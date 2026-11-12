@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "Logger.hpp"
 #include "Types.hpp"
@@ -16,6 +16,8 @@ namespace siever {
 struct PrimeConfig {
     int cpu_count = 0;
     int memory_allowed_mb = 10240;
+    int use_gpu = 0;      // 11.4: UseGPU=1 adds an OpenCL GPU worker
+    int gpu_device = 0;   // 11.4: GPU_device=index
 };
 
 inline std::string trim(std::string value) {
@@ -65,6 +67,10 @@ inline PrimeConfig load_prime_config(const std::string& path) {
             if (key == "CPU_count") {
                 config.cpu_count = std::stoi(value);
                 has_cpu = true;
+            } else if (key == "UseGPU") {
+                config.use_gpu = std::stoi(value);
+            } else if (key == "GPU_device") {
+                config.gpu_device = std::stoi(value);
             } else if (key == "MemoryAllowed") {
                 config.memory_allowed_mb = std::stoi(value);
                 has_memory = true;
@@ -72,7 +78,9 @@ inline PrimeConfig load_prime_config(const std::string& path) {
         }
     }
 
-    if (config.cpu_count <= 0) {
+    if (config.cpu_count == 0 && config.use_gpu != 0) {
+        // 11.4: GPU-only sieving (leave the CPU cores to PRP testing)
+    } else if (config.cpu_count <= 0) {
         config.cpu_count = detect_cpu_count();
         has_cpu = false;
     }
@@ -81,13 +89,16 @@ inline PrimeConfig load_prime_config(const std::string& path) {
         has_memory = false;
     }
 
-    if (!has_cpu || !has_memory || !in) {
+    const bool file_existed = static_cast<bool>(std::ifstream(path));
+    if (!has_cpu || !has_memory || !file_existed) {
         std::ofstream out(path, std::ios::trunc);
         if (!out) {
             log_fatal("Failed to write prime.ini at " + path);
         }
         out << "CPU_count=" << config.cpu_count << "\n";
         out << "MemoryAllowed=" << config.memory_allowed_mb << "\n";
+        out << "UseGPU=" << config.use_gpu << "\n";
+        out << "GPU_device=" << config.gpu_device << "\n";
         log_info("Wrote prime.ini with CPU_count=" + std::to_string(config.cpu_count) +
                  " MemoryAllowed=" + std::to_string(config.memory_allowed_mb) + " MB");
     }
@@ -127,9 +138,9 @@ inline std::vector<WorkItem> load_worktodo(const std::string& path) {
             }
         }
 
-        if (parts.size() != 6) {
+        if (parts.size() != 6 && parts.size() != 8) {
             log_fatal("worktodo line " + std::to_string(line_no) +
-                      " must have 6 comma-separated values (b,c,P0,P1,N0,N1)");
+                      " must have 6 or 8 comma-separated values (b,c,P0,P1,N0,N1[,mod,res])");
         }
 
         WorkItem item;
@@ -141,6 +152,13 @@ inline std::vector<WorkItem> load_worktodo(const std::string& path) {
             item.P1 = Int128(parts[3]);
             item.N0 = Int128(parts[4]);
             item.N1 = Int128(parts[5]);
+            if (parts.size() == 8) {
+                item.cls_mod = std::stoull(parts[6]);
+                item.cls_res = std::stoull(parts[7]);
+                if (item.cls_mod == 0 || item.cls_res >= item.cls_mod) {
+                    throw std::invalid_argument("class must satisfy 0 <= res < mod");
+                }
+            }
         } catch (const std::exception& ex) {
             log_fatal("worktodo line " + std::to_string(line_no) + " parse error: " + ex.what());
         }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Gpu.hpp"
 #include "Logger.hpp"
 #include "Math.hpp"
 #include "Sieve.hpp"
@@ -150,7 +151,7 @@ private:
 inline std::size_t worker_chunk_size_bytes(int memory_allowed_mb, int cpu_count) {
     const unsigned long long total_bytes =
         static_cast<unsigned long long>(memory_allowed_mb) * 1024ULL * 1024ULL;
-    const unsigned long long per_worker = std::max(1ULL, total_bytes / static_cast<unsigned long long>(cpu_count));
+    const unsigned long long per_worker = std::max(1ULL, total_bytes / static_cast<unsigned long long>(std::max(1, cpu_count)));
     return static_cast<std::size_t>(per_worker);
 }
 
@@ -191,7 +192,8 @@ inline std::size_t enqueue_prime_chunks(const WorkItem& item, std::size_t chunk_
 }
 
 inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const WorkItem& item,
-                                 const std::vector<uint32_t>& small_primes, std::atomic<bool>& failed) {
+                                 const std::vector<uint32_t>& small_primes, std::atomic<bool>& failed,
+                                 GpuSiever* gpu = nullptr) {
     if (failed.load()) {
         return 0;
     }
@@ -206,6 +208,17 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
 
         std::mt19937_64 rng(static_cast<uint64_t>(thread_id + 1) ^
                             static_cast<uint64_t>(chunk.low & UInt128(0xFFFFFFFFFFFFFFFFULL)));
+
+        if (gpu != nullptr) {
+            // 11.4: GPU pre-filter, exact CPU re-check of the (few) flagged primes.
+            std::vector<std::size_t> todo;
+            if (gpu->filter(primes, item, todo)) {
+                std::vector<uint64_t> flagged;
+                flagged.reserve(todo.size());
+                for (const std::size_t i : todo) flagged.push_back(primes[i]);
+                primes.swap(flagged);
+            }
+        }
 
         for (const uint64_t prime : primes) {
             // Check for shutdown between each prime so we exit quickly
@@ -243,7 +256,7 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
 }
 
 inline void run_worker_pool(const WorkItem& item, int cpu_count, int memory_allowed_mb,
-                            const std::vector<uint32_t>& small_primes) {
+                            const std::vector<uint32_t>& small_primes, GpuSiever* gpu = nullptr) {
     ChunkQueue queue;
     const std::size_t chunk_size = worker_chunk_size_bytes(memory_allowed_mb, cpu_count);
     const std::size_t total_chunks = count_prime_chunks(item, chunk_size);
@@ -267,6 +280,23 @@ inline void run_worker_pool(const WorkItem& item, int cpu_count, int memory_allo
                 }
                 const std::size_t relations_found =
                     process_chunk(*chunk, thread_id, item, small_primes, failed);
+                if (!failed.load()) {
+                    progress.on_chunk_complete(relations_found);
+                }
+            }
+        });
+    }
+
+    if (gpu != nullptr && gpu->ok()) {
+        const int gpu_id = cpu_count;  // core_<cpu_count>.p
+        workers.emplace_back([&, gpu_id]() {
+            while (!failed.load() && !shutdown_requested.load()) {
+                const auto chunk = queue.pop();
+                if (!chunk) {
+                    break;
+                }
+                const std::size_t relations_found =
+                    process_chunk(*chunk, gpu_id, item, small_primes, failed, gpu);
                 if (!failed.load()) {
                     progress.on_chunk_complete(relations_found);
                 }
@@ -458,6 +488,18 @@ inline void apply_relations(const WorkItem& item, const std::vector<Relation>& r
             const Int128 index = n - item.N0;
             if (index < 0 || index >= Int128(count)) {
                 continue;
+            }
+            // 12.0: do not mark b^n+c as factored when it IS the prime p (e.g. 10^2+111 = 211).
+            {
+                Int128 value = 1;
+                bool fits = true;
+                for (Int128 e = 0; e < n && fits; ++e) {
+                    value *= item.b;
+                    if (value > Int128(relation.p) * 2) fits = false;
+                }
+                if (fits && value + item.c == Int128(relation.p)) {
+                    continue;
+                }
             }
             candidates[static_cast<std::size_t>(index)].push_back(relation.p);
         }

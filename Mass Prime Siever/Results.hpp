@@ -36,9 +36,15 @@ inline std::size_t count_survivors(const std::vector<std::vector<uint64_t>>& can
     return survivors;
 }
 
-inline void log_final_status(const std::vector<std::vector<uint64_t>>& candidates, double elapsed_seconds) {
-    const std::size_t total = candidates.size();
-    const std::size_t survivors = count_survivors(candidates);
+inline void log_final_status(const WorkItem& item, const std::vector<std::vector<uint64_t>>& candidates,
+                             double elapsed_seconds) {
+    std::size_t total = 0;
+    std::size_t survivors = 0;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        if (!in_class(item, item.N0 + Int128(i))) continue;
+        ++total;
+        if (candidates[i].empty()) ++survivors;
+    }
     const double survival_rate = total == 0 ? 0.0 : 100.0 * static_cast<double>(survivors) / static_cast<double>(total);
 
     std::ostringstream message;
@@ -79,6 +85,9 @@ inline void append_results_json(const WorkItem& item, const std::vector<std::vec
 
     for (std::size_t index = 0; index < candidates.size(); ++index) {
         const Int128 n = item.N0 + Int128(index);
+        if (!in_class(item, n)) {
+            continue;
+        }
         if (candidates[index].empty()) {
             prp.push_back(json_int(n));
             continue;

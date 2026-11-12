@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="Siever 11.2.cpp">
+    <ClCompile Include="Siever.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

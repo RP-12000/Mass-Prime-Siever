@@ -48,6 +48,33 @@ inline void segmented_sieve(UInt128 low, UInt128 high, const std::vector<uint32_
         return;
     }
 
+    // 12.0 fast path: native 64-bit, odd numbers only (the old loop used boost uint128 for every step).
+    if (high < (UInt128(1) << 63) && low > 3) {
+        const uint64_t lo = static_cast<uint64_t>(low) | 1ULL;  // first odd >= low
+        const uint64_t hi = static_cast<uint64_t>(high);
+        if (lo >= hi) {
+            return;
+        }
+        const uint64_t count = (hi - lo + 1) / 2;  // odd numbers lo, lo+2, ... < hi
+        std::vector<uint8_t> composite(static_cast<std::size_t>(count), 0);
+        for (const uint32_t p32 : small_primes) {
+            const uint64_t p = p32;
+            if (p == 2) continue;
+            if (p * p >= hi) break;
+            uint64_t start = std::max<uint64_t>(p * p, ((lo + p - 1) / p) * p);
+            if ((start & 1) == 0) start += p;
+            for (uint64_t v = (start - lo) / 2; v < count; v += p) {
+                composite[static_cast<std::size_t>(v)] = 1;
+            }
+        }
+        for (uint64_t i = 0; i < count; ++i) {
+            if (!composite[static_cast<std::size_t>(i)]) {
+                primes_out.push_back(lo + 2 * i);
+            }
+        }
+        return;
+    }
+
     const std::size_t segment_size = static_cast<std::size_t>(high - low);
     std::vector<uint8_t> composite(segment_size, 0);
 
