@@ -238,8 +238,8 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
     }
 
     if (!relations.empty()) {
-        FILE* file = nullptr;
-        if (fopen_s(&file, output_path.c_str(), "ab") != 0 || file == nullptr) {
+        FILE* file = open_file(output_path.c_str(), "ab");
+        if (file == nullptr) {
             log_fatal("Failed to append to " + output_path);
         }
 

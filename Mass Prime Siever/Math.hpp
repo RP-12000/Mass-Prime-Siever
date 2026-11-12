@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Portable.hpp"
 #include "Types.hpp"
 
 #include <algorithm>
@@ -10,7 +11,6 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
-#include <intrin.h>
 
 namespace siever {
 
@@ -21,10 +21,8 @@ inline uint64_t to_uint64(Int128 value) {
 // 12.0: hardware 64x64->128 multiply + 128/64 divide (was boost::multiprecision software division).
 inline uint64_t mulmod(uint64_t a, uint64_t b, uint64_t mod) {
     uint64_t hi = 0;
-    const uint64_t lo = _umul128(a % mod, b % mod, &hi);
-    uint64_t rem = 0;
-    _udiv128(hi, lo, mod, &rem);
-    return rem;
+    const uint64_t lo = mul_64x64_128(a % mod, b % mod, &hi);
+    return mod_128_64(hi, lo, mod);
 }
 
 // 12.0: Montgomery arithmetic for odd moduli < 2^63 (hot path of BSGS).
@@ -42,23 +40,23 @@ struct Montgomery {
         ninv = 0 - inv;
         one = (0 - modulus) % modulus;
         uint64_t hi = 0;
-        const uint64_t lo = _umul128(one, one, &hi);
-        _udiv128(hi, lo, modulus, &r2);
+        const uint64_t lo = mul_64x64_128(one, one, &hi);
+        r2 = mod_128_64(hi, lo, modulus);
     }
 
     uint64_t redc(uint64_t hi, uint64_t lo) const {
         const uint64_t m = lo * ninv;
         uint64_t mhi = 0;
-        const uint64_t mlo = _umul128(m, n, &mhi);
+        const uint64_t mlo = mul_64x64_128(m, n, &mhi);
         uint64_t discard = 0;
-        unsigned char carry = _addcarry_u64(0, lo, mlo, &discard);
+        const unsigned char carry = add_carry_64(0, lo, mlo, &discard);
         uint64_t t = 0;
-        _addcarry_u64(carry, hi, mhi, &t);  // n < 2^63 => no overflow
+        add_carry_64(carry, hi, mhi, &t);  // n < 2^63 => no overflow
         return t >= n ? t - n : t;
     }
     uint64_t mul(uint64_t a, uint64_t b) const {
         uint64_t hi = 0;
-        const uint64_t lo = _umul128(a, b, &hi);
+        const uint64_t lo = mul_64x64_128(a, b, &hi);
         return redc(hi, lo);
     }
     uint64_t to_mont(uint64_t a) const { return mul(a % n, r2); }

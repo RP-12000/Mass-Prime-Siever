@@ -364,3 +364,6 @@ FodyWeavers.xsd
 # local benchmark / verification runs
 tests/
 
+
+# CMake build directory
+/build/

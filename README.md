@@ -74,8 +74,29 @@ GPU_device=0      # index of the OpenCL GPU
 
 ## Building
 
-Visual Studio 2026 (v145 toolset), C++20, vcpkg with `boost` (multiprecision, json, date_time) and
-`opencl`. Open `Mass Prime Siever.slnx` and build `Release | x64`.
+The same sources build with MSVC on Windows and with GCC/Clang on Linux. Compiler-specific
+intrinsics (`_umul128`, `_udiv128`, `_addcarry_u64`, `fopen_s`) are wrapped in `Portable.hpp`;
+MSVC still uses the native intrinsics.
+
+**Windows (Visual Studio).** Visual Studio 2026 (v145 toolset), C++20, vcpkg with `boost`
+(multiprecision, json, date_time) and `opencl`. Open `Mass Prime Siever.slnx` and build
+`Release | x64`. CMake also works:
+`cmake -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake && cmake --build build --config Release`.
+
+**Linux.**
+
+```
+sudo apt-get install cmake g++ libboost-dev libboost-json-dev libboost-date-time-dev ocl-icd-opencl-dev opencl-headers
+cmake -B build -DSIEVER_NATIVE=ON && cmake --build build -j
+```
+
+Ctrl+C (SIGINT), SIGTERM and SIGHUP checkpoint into `core_*.p` like closing the console window
+on Windows. `SIEVER_OPENCL_ANY_DEVICE=1` lets the GPU worker use a CPU OpenCL device such as PoCL
+(for testing the GPU code path without a GPU).
+
+**Kaggle.** See `kaggle/`: `mass_prime_siever_kaggle.ipynb` builds the siever, runs one worker per
+GPU, stops and checkpoints before the 12 h session limit, and resumes from the previous
+session's output.
 
 ## License
 

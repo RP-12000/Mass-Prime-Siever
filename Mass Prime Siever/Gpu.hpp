@@ -14,6 +14,7 @@
 #include "Types.hpp"
 
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -274,11 +275,16 @@ public:
         std::vector<cl_platform_id> plats(np);
         clGetPlatformIDs(np, plats.data(), nullptr);
         std::vector<cl_device_id> devs;
+        // SIEVER_OPENCL_ANY_DEVICE=1 also accepts CPU OpenCL devices (e.g. PoCL), for testing
+        // the GPU code path on machines without a GPU.
+        const char* any_env = std::getenv("SIEVER_OPENCL_ANY_DEVICE");
+        const cl_device_type dev_type =
+            (any_env != nullptr && any_env[0] == '1') ? CL_DEVICE_TYPE_ALL : CL_DEVICE_TYPE_GPU;
         for (auto pl : plats) {
             cl_uint nd = 0;
-            if (clGetDeviceIDs(pl, CL_DEVICE_TYPE_GPU, 0, nullptr, &nd) != CL_SUCCESS || nd == 0) continue;
+            if (clGetDeviceIDs(pl, dev_type, 0, nullptr, &nd) != CL_SUCCESS || nd == 0) continue;
             std::vector<cl_device_id> d(nd);
-            clGetDeviceIDs(pl, CL_DEVICE_TYPE_GPU, nd, d.data(), nullptr);
+            clGetDeviceIDs(pl, dev_type, nd, d.data(), nullptr);
             devs.insert(devs.end(), d.begin(), d.end());
         }
         if (devs.empty()) return fail("no OpenCL GPU device");

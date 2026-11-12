@@ -12,8 +12,13 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <csignal>
+#include <unistd.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Globals used by the Windows console control handler
@@ -42,6 +47,7 @@ static void log_elapsed_times()
     g_shutdown_logged.store(true);
 }
 
+#ifdef _WIN32
 BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl_type)
 {
     if (ctrl_type == CTRL_CLOSE_EVENT) {
@@ -57,12 +63,31 @@ BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl_type)
     }
     return FALSE;
 }
+#else
+// Linux: SIGINT (Ctrl+C) / SIGTERM / SIGHUP ask workers to stop after their current chunk;
+// main() then checkpoints into core_*.p and writes the elapsed-time lines.
+extern "C" void posix_shutdown_handler(int)
+{
+    siever::shutdown_requested.store(true);
+}
+#endif
 
 int main() {
 
     using namespace siever;
 
+#ifdef _WIN32
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+#else
+    {
+        struct sigaction action {};
+        action.sa_handler = posix_shutdown_handler;
+        sigemptyset(&action.sa_mask);
+        sigaction(SIGINT, &action, nullptr);
+        sigaction(SIGTERM, &action, nullptr);
+        sigaction(SIGHUP, &action, nullptr);
+    }
+#endif
 
     try {
 
@@ -80,7 +105,7 @@ int main() {
                      std::to_string(static_cast<long long>(g_previous_total_seconds)) + " s");
         }
 
-        const PrimeConfig config = load_prime_config("prime.ini");
+        PrimeConfig config = load_prime_config("prime.ini");
 
         std::vector<WorkItem> work_items = load_worktodo("worktodo.txt");
 
@@ -92,6 +117,13 @@ int main() {
         siever::GpuSiever* gpu_ptr = nullptr;
         if (config.use_gpu != 0 && gpu.init(config.gpu_device)) {
             gpu_ptr = &gpu;
+        }
+        if (gpu_ptr == nullptr && config.cpu_count <= 0) {
+            // CPU_count=0 means "GPU only"; without a GPU nothing would sieve and every n would
+            // be reported as a survivor. Fall back to all CPU threads instead.
+            config.cpu_count = detect_cpu_count();
+            log_info("No GPU available with CPU_count=0, using " + std::to_string(config.cpu_count) +
+                     " CPU threads instead");
         }
 
         for (std::size_t work_index = 0; work_index < work_items.size(); ++work_index) {
@@ -150,7 +182,12 @@ int main() {
         // Always write session/total elapsed lines at exit.
         log_elapsed_times();
 
-        if (!shutdown_requested.load()) {
+#ifdef _WIN32
+        const bool interactive = true;
+#else
+        const bool interactive = isatty(STDIN_FILENO) != 0;
+#endif
+        if (!shutdown_requested.load() && interactive) {
             std::cout << "\nPress Enter to exit..." << std::endl;
             std::cin.clear();
             std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
