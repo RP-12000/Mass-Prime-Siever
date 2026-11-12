@@ -196,6 +196,14 @@ def main():
                               capture_output=True, text=True).stdout
         print(f"--- {slot} ---\n{tail}")
 
+    results = [os.path.join(args.state, slot, "results.json") for slot in slots]
+    if all(os.path.exists(r) for r in results):
+        merged = os.path.join(os.path.dirname(args.state.rstrip("/")) or ".", "candidates.txt")
+        subprocess.run([sys.executable, os.path.join(ROOT, "kaggle", "merge_results.py"), *results,
+                        "-o", merged], check=False)
+    else:
+        print("Not finished yet: run the notebook again with this version's output as input.")
+
 
 if __name__ == "__main__":
     main()
