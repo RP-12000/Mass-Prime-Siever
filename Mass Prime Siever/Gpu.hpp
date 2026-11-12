@@ -319,9 +319,8 @@ public:
         std::vector<cl_device_id> devs;
         // SIEVER_OPENCL_ANY_DEVICE=1 also accepts CPU OpenCL devices (e.g. PoCL), for testing
         // the GPU code path on machines without a GPU.
-        const char* any_env = std::getenv("SIEVER_OPENCL_ANY_DEVICE");
         const cl_device_type dev_type =
-            (any_env != nullptr && any_env[0] == '1') ? CL_DEVICE_TYPE_ALL : CL_DEVICE_TYPE_GPU;
+            get_env("SIEVER_OPENCL_ANY_DEVICE") == "1" ? CL_DEVICE_TYPE_ALL : CL_DEVICE_TYPE_GPU;
         for (auto pl : plats) {
             cl_uint nd = 0;
             if (clGetDeviceIDs(pl, dev_type, 0, nullptr, &nd) != CL_SUCCESS || nd == 0) continue;

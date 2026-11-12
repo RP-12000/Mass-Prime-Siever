@@ -10,6 +10,7 @@
 // /usr/local/cuda/lib64.
 
 #include "Logger.hpp"
+#include "Portable.hpp"
 #include "Math.hpp"
 #include "Types.hpp"
 
@@ -132,11 +133,11 @@ inline std::string load(Api& api) {
               bind(cuda, api.cuMemsetD32, "cuMemsetD32_v2") && bind(cuda, api.cuLaunchKernel, "cuLaunchKernel");
     if (!ok) return "CUDA driver is missing required functions";
 
-    const char* env = std::getenv("SIEVER_NVRTC");
+    const std::string env = get_env("SIEVER_NVRTC");
 #ifdef _WIN32
-    void* nvrtc = open_library({env ? env : "", "nvrtc64_130_0.dll", "nvrtc64_120_0.dll", "nvrtc64_112_0.dll"});
+    void* nvrtc = open_library({env, "nvrtc64_130_0.dll", "nvrtc64_120_0.dll", "nvrtc64_112_0.dll"});
 #else
-    void* nvrtc = open_library({env ? env : "", "libnvrtc.so", "libnvrtc.so.13", "libnvrtc.so.12",
+    void* nvrtc = open_library({env, "libnvrtc.so", "libnvrtc.so.13", "libnvrtc.so.12",
                                 "libnvrtc.so.11.2", "/usr/local/cuda/lib64/libnvrtc.so"});
 #endif
     if (nvrtc == nullptr) return "NVRTC not found (set SIEVER_NVRTC to the path of libnvrtc)";

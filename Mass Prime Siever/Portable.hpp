@@ -5,6 +5,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
@@ -65,6 +67,24 @@ inline FILE* open_file(const char* path, const char* mode) {
     return file;
 #else
     return std::fopen(path, mode);
+#endif
+}
+
+// Value of an environment variable, or "" if it is not set. MSVC uses _dupenv_s (getenv is
+// deprecated there, C4996, which SDL checks turn into an error).
+inline std::string get_env(const char* name) {
+#if defined(_MSC_VER)
+    char* buffer = nullptr;
+    size_t length = 0;
+    std::string value;
+    if (_dupenv_s(&buffer, &length, name) == 0 && buffer != nullptr) {
+        value = buffer;
+    }
+    std::free(buffer);
+    return value;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
 #endif
 }
 
