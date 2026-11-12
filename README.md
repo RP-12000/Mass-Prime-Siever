@@ -4,7 +4,7 @@ A sieve for exponential sequences `b^n + c` (for example `10^n + 111`, `10^n + 9
 For every prime `p` in `[P0, P1)` it finds all `n` in `[N0, N1)` with `p | b^n + c`, using a
 baby-step giant-step discrete log, and writes the surviving `n` (PRP candidates) to `results.json`.
 
-Current version: **12.0** (successor of Siever 11.2; output format unchanged).
+Current version: **12.0** (successor of Siever 11.2; same file formats, see `relations.p` below).
 
 ## What's new in 12.0
 
@@ -55,6 +55,9 @@ GPU_device=0      # index of the OpenCL GPU
 ## Output
 
 - `relations.p`: `p, M, q` per line - `p` divides `b^n + c` for every `n == M (mod q)`.
+  Since 12.0 only relations that hit at least one `n` in `[N0, N1)` are written, and `M` may be
+  the first such `n` rather than the smallest residue mod `q` (use `M mod q` when comparing with
+  11.2 output). Skipping relations that miss the range keeps the file and the merge step smaller.
 - `results.json`: per work item, the list of surviving `n` (`prp`) and the factored `n` with their
   factors. Only in-class `n` are listed when a class is given.
 - `siever.log`: progress, ETA and timing. Closing the console window checkpoints into `core_*.p`;
