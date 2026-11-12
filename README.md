@@ -94,6 +94,12 @@ Ctrl+C (SIGINT), SIGTERM and SIGHUP checkpoint into `core_*.p` like closing the 
 on Windows. `SIEVER_OPENCL_ANY_DEVICE=1` lets the GPU worker use a CPU OpenCL device such as PoCL
 (for testing the GPU code path without a GPU).
 
+**GPU backends.** `GPU_backend=auto|cuda|opencl` in `prime.ini` (default `auto`: CUDA when an
+NVIDIA driver and NVRTC are present, otherwise OpenCL). Both backends run the same kernel source
+(`kGpuKernelBody` in `Gpu.hpp`, with a small prelude per dialect). The CUDA backend loads the
+driver and NVRTC at run time, so building needs no CUDA toolkit; set `SIEVER_NVRTC` to the
+library path if NVRTC is not on the default search path.
+
 **Kaggle.** See `kaggle/`: `mass_prime_siever_kaggle.ipynb` builds the siever, runs one worker per
 GPU, stops and checkpoints before the 12 h session limit, and resumes from the previous
 session's output.

@@ -19,7 +19,7 @@ find_package(Threads REQUIRED)
 find_package(Boost REQUIRED COMPONENTS json)
 
 add_executable(mass-prime-siever "Mass Prime Siever/Siever.cpp")
-target_link_libraries(mass-prime-siever PRIVATE Threads::Threads Boost::boost Boost::json)
+target_link_libraries(mass-prime-siever PRIVATE Threads::Threads Boost::boost Boost::json ${CMAKE_DL_LIBS})
 
 if(SIEVER_OPENCL)
     find_package(OpenCL REQUIRED)

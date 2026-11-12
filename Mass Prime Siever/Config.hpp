@@ -18,6 +18,7 @@ struct PrimeConfig {
     int memory_allowed_mb = 10240;
     int use_gpu = 0;      // 11.4: UseGPU=1 adds an OpenCL GPU worker
     int gpu_device = 0;   // 11.4: GPU_device=index
+    std::string gpu_backend = "auto";  // GPU_backend=auto|cuda|opencl
 };
 
 inline std::string trim(std::string value) {
@@ -71,6 +72,8 @@ inline PrimeConfig load_prime_config(const std::string& path) {
                 config.use_gpu = std::stoi(value);
             } else if (key == "GPU_device") {
                 config.gpu_device = std::stoi(value);
+            } else if (key == "GPU_backend") {
+                config.gpu_backend = value;
             } else if (key == "MemoryAllowed") {
                 config.memory_allowed_mb = std::stoi(value);
                 has_memory = true;

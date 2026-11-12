@@ -18,6 +18,7 @@ if [ ! -e /etc/OpenCL/vendors/nvidia.icd ]; then
         echo "$NV_OCL" | $SUDO tee /etc/OpenCL/vendors/nvidia.icd >/dev/null
     fi
 fi
+nvidia-smi -L || true
 echo "== OpenCL devices =="
 clinfo -l || true
 

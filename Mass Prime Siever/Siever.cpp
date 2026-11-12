@@ -115,7 +115,7 @@ int main() {
 
         siever::GpuSiever gpu;
         siever::GpuSiever* gpu_ptr = nullptr;
-        if (config.use_gpu != 0 && gpu.init(config.gpu_device)) {
+        if (config.use_gpu != 0 && gpu.init(config.gpu_device, config.gpu_backend)) {
             gpu_ptr = &gpu;
         }
         if (gpu_ptr == nullptr && config.cpu_count <= 0) {

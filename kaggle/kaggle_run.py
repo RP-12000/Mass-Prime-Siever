@@ -34,6 +34,45 @@ def gpu_count():
         return 0
 
 
+def find_nvrtc():
+    """Path of an NVRTC library for the CUDA backend (Kaggle ships it with the CUDA toolkit and pip)."""
+    patterns = ["/usr/local/cuda*/lib64/libnvrtc.so*", "/usr/lib/x86_64-linux-gnu/libnvrtc.so*"]
+    patterns += [os.path.join(p, "nvidia", "cuda_nvrtc", "lib", "libnvrtc.so*") for p in sys.path if p]
+    for pattern in patterns:
+        for path in sorted(glob.glob(pattern)):
+            if "builtins" not in path and "alt" not in os.path.basename(path):
+                return path
+    return None
+
+
+def self_test(env, backend, scratch="/tmp/siever_selftest"):
+    """Sieve a small range on the GPU backend alone and on the CPU alone; the relations must match."""
+    item = "Factor=2,-25,10000000000,10020000000,3600000,5000000,2,1\n"
+    out = {}
+    for name, ini in (("gpu", f"CPU_count=0\nMemoryAllowed=16\nUseGPU=1\nGPU_device=0\nGPU_backend={backend}\n"),
+                      ("cpu", f"CPU_count={os.cpu_count() or 2}\nMemoryAllowed=16\nUseGPU=0\n")):
+        d = os.path.join(scratch, name)
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d)
+        with open(os.path.join(d, "worktodo.txt"), "w") as f:
+            f.write(item)
+        with open(os.path.join(d, "prime.ini"), "w") as f:
+            f.write(ini)
+        subprocess.run([BINARY], cwd=d, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, env=env, check=True)
+        with open(os.path.join(d, "siever.log")) as f:
+            log = f.read()
+        if name == "gpu" and "GPU enabled" not in log:
+            print("Self-test: no GPU backend came up; see", os.path.join(d, "siever.log"))
+            return False
+        rel = os.path.join(d, "relations.p")
+        out[name] = sorted(open(rel).read().split("\n")) if os.path.exists(rel) else []
+    ok = out["gpu"] == out["cpu"] and len(out["cpu"]) > 1
+    print(f"Self-test ({backend}): GPU {len(out['gpu']) - 1} relations, CPU {len(out['cpu']) - 1} relations ->",
+          "OK" if ok else "MISMATCH")
+    return ok
+
+
 def restore(state_dir, input_root):
     """Copy the newest previous state from /kaggle/input into state_dir (only if state_dir is empty)."""
     if os.path.isdir(state_dir) and os.listdir(state_dir):
@@ -63,6 +102,8 @@ def main():
     ap.add_argument("--gpus", type=int, default=None, help="number of GPU workers (default: all)")
     ap.add_argument("--cpu-threads", type=int, default=None,
                     help="CPU threads per worker (default: spread the free cores over the workers)")
+    ap.add_argument("--backend", default="auto", choices=["auto", "cuda", "opencl"])
+    ap.add_argument("--skip-self-test", action="store_true")
     ap.add_argument("--state", default="/kaggle/working/siever_state")
     ap.add_argument("--input", default="/kaggle/input")
     args = ap.parse_args()
@@ -93,11 +134,31 @@ def main():
             with open(os.path.join(d, "worktodo.txt"), "w") as f:
                 f.write(line + "\n")
             with open(os.path.join(d, "prime.ini"), "w") as f:
-                f.write(f"CPU_count={cpu}\nMemoryAllowed=64\nUseGPU=1\nGPU_device={i}\n")
+                f.write(f"CPU_count={cpu}\nMemoryAllowed=64\nUseGPU=1\nGPU_device={i}\nGPU_backend={args.backend}\n")
             print(f"gpu{i}: {line}  (CPU_count={cpu})")
         slots = sorted(d for d in os.listdir(args.state) if d.startswith("gpu"))
     elif not restored:
         print("Continuing state already in", args.state)
+
+    env = dict(os.environ)
+    if "SIEVER_NVRTC" not in env:
+        nvrtc = find_nvrtc()
+        if nvrtc:
+            env["SIEVER_NVRTC"] = nvrtc
+            print("NVRTC:", nvrtc)
+        else:
+            print("NVRTC not found: the CUDA backend is off, OpenCL will be used")
+
+    if not args.skip_self_test and not self_test(env, args.backend):
+        if args.backend != "opencl" and self_test(env, "opencl"):
+            print("Falling back to OpenCL for this session")
+            for slot in slots:
+                ini = os.path.join(args.state, slot, "prime.ini")
+                text = open(ini).read()
+                text = "\n".join(l for l in text.splitlines() if not l.startswith("GPU_backend")) + "\nGPU_backend=opencl\n"
+                open(ini, "w").write(text)
+        else:
+            sys.exit("GPU self-test failed; not starting the run.")
 
     procs = []
     for slot in slots:
@@ -107,7 +168,7 @@ def main():
             continue
         log = open(os.path.join(d, "stdout.txt"), "a")
         procs.append((slot, subprocess.Popen([BINARY], cwd=d, stdin=subprocess.DEVNULL,
-                                              stdout=log, stderr=subprocess.STDOUT)))
+                                              stdout=log, stderr=subprocess.STDOUT, env=env)))
         print(f"{slot}: started")
 
     deadline = time.time() + args.hours * 3600
@@ -127,6 +188,10 @@ def main():
 
     for slot in slots:
         d = os.path.join(args.state, slot)
+        backend = subprocess.run(["grep", "-m1", "GPU enabled", os.path.join(d, "siever.log")],
+                                 capture_output=True, text=True).stdout.strip()
+        if backend:
+            print(backend)
         tail = subprocess.run(["tail", "-n", "3", os.path.join(d, "siever.log")],
                               capture_output=True, text=True).stdout
         print(f"--- {slot} ---\n{tail}")

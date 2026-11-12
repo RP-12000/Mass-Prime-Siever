@@ -9,6 +9,7 @@
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
 
+#include "Cuda.hpp"
 #include "Logger.hpp"
 #include "Math.hpp"
 #include "Types.hpp"
@@ -21,22 +22,62 @@
 
 namespace siever {
 
-static const char* kGpuKernelSource = R"CLC(
+// Kernel source shared by the OpenCL and CUDA (NVRTC) backends. Each backend prepends its own
+// prelude that maps the macros below (KERNEL, GLOBAL, LOCAL, BARRIER, ...) to its dialect.
+static const char* kOpenClPrelude = R"CLC(
 typedef ulong u64;
 typedef uint u32;
+typedef long i64;
+#define KERNEL __kernel
+#define GLOBAL __global
+#define LOCAL __local
+#define DEVICE_FN inline
+#define DYN_LOCAL_PARAM(name) , __local u32* name
+#define DYN_LOCAL_DECL(name)
+#define ATOMIC_INC(ptr) atomic_inc(ptr)
+#define ATOMIC_CAS(ptr, cmp, val) atomic_cmpxchg(ptr, cmp, val)
+#define BARRIER() barrier(CLK_LOCAL_MEM_FENCE)
+#define GLOBAL_ID() get_global_id(0)
+#define LOCAL_ID() get_local_id(0)
+#define GROUP_ID() get_group_id(0)
+#define MUL_HI(a, b) mul_hi(a, b)
+)CLC";
 
-inline u64 mmul(u64 a, u64 b, u64 n, u64 ninv) {
+static const char* kCudaPrelude = R"CLC(
+typedef unsigned long long u64;
+typedef unsigned int u32;
+typedef long long i64;
+typedef unsigned char uchar;
+typedef unsigned int uint;
+#define KERNEL extern "C" __global__
+#define GLOBAL
+#define LOCAL __shared__
+#define DEVICE_FN __device__ __forceinline__
+#define DYN_LOCAL_PARAM(name)
+#define DYN_LOCAL_DECL(name) extern __shared__ u32 name[];
+#define ATOMIC_INC(ptr) atomicAdd((unsigned int*)(ptr), 1u)
+#define ATOMIC_CAS(ptr, cmp, val) atomicCAS(ptr, cmp, val)
+#define BARRIER() __syncthreads()
+#define GLOBAL_ID() (blockIdx.x * blockDim.x + threadIdx.x)
+#define LOCAL_ID() threadIdx.x
+#define GROUP_ID() blockIdx.x
+#define MUL_HI(a, b) __umul64hi(a, b)
+)CLC";
+
+static const char* kGpuKernelBody = R"CLC(
+
+DEVICE_FN u64 mmul(u64 a, u64 b, u64 n, u64 ninv) {
     u64 lo = a * b;
-    u64 hi = mul_hi(a, b);
+    u64 hi = MUL_HI(a, b);
     u64 m = lo * ninv;
     u64 mlo = m * n;
-    u64 mhi = mul_hi(m, n);
+    u64 mhi = MUL_HI(m, n);
     u64 s = lo + mlo;
     u64 t = hi + mhi + (s < lo ? 1UL : 0UL);
     return t >= n ? t - n : t;
 }
 
-inline u64 mpow(u64 base, u64 e, u64 one, u64 n, u64 ninv) {
+DEVICE_FN u64 mpow(u64 base, u64 e, u64 one, u64 n, u64 ninv) {
     u64 r = one;
     while (e) {
         if (e & 1UL) r = mmul(r, base, n, ninv);
@@ -46,21 +87,21 @@ inline u64 mpow(u64 base, u64 e, u64 one, u64 n, u64 ninv) {
     return r;
 }
 
-inline u64 gcd64(u64 a, u64 b) {
+DEVICE_FN u64 gcd64(u64 a, u64 b) {
     while (b) { u64 t = a % b; a = b; b = t; }
     return a;
 }
 
-inline u32 fp32(u64 x) {
+DEVICE_FN u32 fp32(u64 x) {
     u32 f = (u32)(x ^ (x >> 29));
     return f == 0xFFFFFFFFu ? 0xFFFFFFFEu : f;
 }
 
 // flags: 0 = no in-class solution, 1 = maybe (verify on CPU), 2 = handle on CPU
-__kernel void bsgs(__global const u64* primes, __global uchar* flags, __global u32* tables,
-                   const u64 b, const long c, const u64 N0, const u64 N1,
+KERNEL void bsgs(GLOBAL const u64* primes, GLOBAL uchar* flags, GLOBAL u32* tables,
+                   const u64 b, const i64 c, const u64 N0, const u64 N1,
                    const u64 cm, const u64 cres, const u32 tbits, const u32 count) {
-    const u32 gid = get_global_id(0);
+    const u32 gid = GLOBAL_ID();
     if (gid >= count) return;
     const u64 p = primes[gid];
     if (p < 1000UL || (p & 1UL) == 0) { flags[gid] = 2; return; }
@@ -118,7 +159,7 @@ __kernel void bsgs(__global const u64* primes, __global uchar* flags, __global u
     const u32 tsize = 1u << tbits;
     const u32 mask = tsize - 1u;
     // the host sized the table for the largest m of the batch
-    __global u32* tab = tables + (size_t)gid * tsize;
+    GLOBAL u32* tab = tables + (u64)gid * tsize;
     for (u32 i = 0; i < tsize; ++i) tab[i] = 0xFFFFFFFFu;
 
     u64 power = one;
@@ -151,11 +192,11 @@ __kernel void bsgs(__global const u64* primes, __global uchar* flags, __global u
 }
 // ---------------- 12.0 v2: prep (filter + setup) then one workgroup per prime ----------------
 // entry layout (7 x u64): idx, p, ninv, one, B, target, jcount
-__kernel void prep(__global const u64* primes, __global uchar* flags, __global u64* ent,
-                   __global volatile uint* ent_count,
-                   const u64 b, const long c, const u64 N0, const u64 N1,
+KERNEL void prep(GLOBAL const u64* primes, GLOBAL uchar* flags, GLOBAL u64* ent,
+                   GLOBAL volatile uint* ent_count,
+                   const u64 b, const i64 c, const u64 N0, const u64 N1,
                    const u64 cm, const u64 cres, const u32 count) {
-    const u32 gid = get_global_id(0);
+    const u32 gid = GLOBAL_ID();
     if (gid >= count) return;
     const u64 p = primes[gid];
     flags[gid] = 0;
@@ -201,19 +242,20 @@ __kernel void prep(__global const u64* primes, __global uchar* flags, __global u
     }
     if (kcount <= parity) return;
     const u64 jcount = (kcount - parity + stride - 1) / stride;
-    const uint slot = atomic_inc(ent_count);
-    __global u64* e7 = ent + (size_t)slot * 7;
+    const uint slot = ATOMIC_INC(ent_count);
+    GLOBAL u64* e7 = ent + (u64)slot * 7;
     e7[0] = gid; e7[1] = p; e7[2] = ninv; e7[3] = one; e7[4] = B; e7[5] = target; e7[6] = jcount;
 }
 
 #define WG 64
-__kernel void bsgs_wg(__global const u64* ent, __global uchar* flags, const u32 tbits,
-                      __local u32* tab) {
-    __local u64 pw[WG];
-    __local u64 st[2];
-    __local volatile int hit;
-    const u32 lid = get_local_id(0);
-    __global const u64* e7 = ent + (size_t)get_group_id(0) * 7;
+KERNEL void bsgs_wg(GLOBAL const u64* ent, GLOBAL uchar* flags, const u32 tbits
+                      DYN_LOCAL_PARAM(tab)) {
+    DYN_LOCAL_DECL(tab)
+    LOCAL u64 pw[WG];
+    LOCAL u64 st[2];
+    LOCAL volatile int hit;
+    const u32 lid = LOCAL_ID();
+    GLOBAL const u64* e7 = ent + (u64)GROUP_ID() * 7;
     const u64 idx = e7[0], p = e7[1], ninv = e7[2], one = e7[3], B = e7[4], target = e7[5], jcount = e7[6];
     u64 m = (u64)sqrt((double)jcount);
     while (m * m < jcount) ++m;
@@ -226,20 +268,20 @@ __kernel void bsgs_wg(__global const u64* ent, __global uchar* flags, const u32 
         for (int k = 0; k < WG; ++k) { pw[k] = x; x = mmul(x, B, p, ninv); }
         st[0] = x;
     }
-    barrier(CLK_LOCAL_MEM_FENCE);
+    BARRIER();
     u64 v = pw[lid];
     const u64 bstep = st[0];
     for (u64 i = lid; i < m; i += WG) {
         u32 f = fp32(v);
         u32 h = (u32)((v * 0x9E3779B97F4A7C15UL) >> (64 - tbits));
         for (;;) {
-            u32 prev = atomic_cmpxchg(&tab[h], 0xFFFFFFFFu, f);
+            u32 prev = ATOMIC_CAS(&tab[h], 0xFFFFFFFFu, f);
             if (prev == 0xFFFFFFFFu || prev == f) break;
             h = (h + 1u) & mask;
         }
         v = mmul(v, bstep, p, ninv);
     }
-    barrier(CLK_LOCAL_MEM_FENCE);
+    BARRIER();
     if (lid == 0) {
         const u64 Bm = mpow(B, m, one, p, ninv);
         const u64 S = mpow(Bm, p - 2UL, one, p, ninv);
@@ -250,7 +292,7 @@ __kernel void bsgs_wg(__global const u64* ent, __global uchar* flags, const u32 
         for (int k = 0; k < 6; ++k) s64 = mmul(s64, s64, p, ninv);
         st[1] = s64;
     }
-    barrier(CLK_LOCAL_MEM_FENCE);
+    BARRIER();
     const u64 G = (jcount + m - 1) / m;
     v = pw[lid];
     const u64 gstep = st[1];
@@ -261,13 +303,13 @@ __kernel void bsgs_wg(__global const u64* ent, __global uchar* flags, const u32 
         while (tab[h] != 0xFFFFFFFFu) { if (tab[h] == f) { hit = 1; break; } h = (h + 1u) & mask; }
         v = mmul(v, gstep, p, ninv);
     }
-    barrier(CLK_LOCAL_MEM_FENCE);
+    BARRIER();
     if (lid == 0 && hit) flags[idx] = 1;
 }
 
 )CLC";
 
-class GpuSiever {
+class OpenClSiever {
 public:
     bool init(int device_index) {
         cl_uint np = 0;
@@ -301,8 +343,8 @@ public:
         if (err != CL_SUCCESS) return fail("clCreateContext " + std::to_string(err));
         queue_ = clCreateCommandQueue(ctx_, dev_, 0, &err);
         if (err != CL_SUCCESS) return fail("clCreateCommandQueue " + std::to_string(err));
-        const char* src = kGpuKernelSource;
-        prog_ = clCreateProgramWithSource(ctx_, 1, &src, nullptr, &err);
+        const char* srcs[2] = {kOpenClPrelude, kGpuKernelBody};
+        prog_ = clCreateProgramWithSource(ctx_, 2, srcs, nullptr, &err);
         if (err != CL_SUCCESS) return fail("clCreateProgramWithSource " + std::to_string(err));
         err = clBuildProgram(prog_, 1, &dev_, "", nullptr, nullptr);
         if (err != CL_SUCCESS) {
@@ -321,7 +363,7 @@ public:
         cl_ulong lmem = 0;
         clGetDeviceInfo(dev_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(lmem), &lmem, nullptr);
         local_mem_ = lmem;
-        log_info(std::string("GPU enabled: ") + name + ", global mem " + std::to_string(gmem >> 20) +
+        log_info(std::string("GPU enabled (OpenCL): ") + name + ", global mem " + std::to_string(gmem >> 20) +
                  " MB, max alloc " + std::to_string(maxalloc >> 20) + " MB");
         ok_ = true;
         return true;
@@ -479,7 +521,7 @@ private:
         batch_ = table_bytes_ = 0;
     }
     bool fail(const std::string& msg) {
-        log_info("GPU disabled: " + msg);
+        log_info("OpenCL unavailable: " + msg);
         ok_ = false;
         return false;
     }
@@ -498,6 +540,36 @@ private:
     cl_mem d_primes_ = nullptr, d_flags_ = nullptr, d_tables_ = nullptr;
     size_t batch_ = 0, table_bytes_ = 0;
     cl_ulong max_alloc_ = 0;
+};
+
+// Picks the GPU backend. GPU_backend in prime.ini: "auto" (default: CUDA if an NVIDIA driver and
+// NVRTC are present, otherwise OpenCL), "cuda" or "opencl".
+class GpuSiever {
+public:
+    bool init(int device_index, const std::string& backend = "auto") {
+        if (backend == "cuda" || backend == "auto") {
+            if (cuda_.init(device_index, std::string(kCudaPrelude) + kGpuKernelBody)) {
+                use_cuda_ = true;
+                return true;
+            }
+            if (backend == "cuda") {
+                log_info("GPU disabled: GPU_backend=cuda but CUDA is unavailable");
+                return false;
+            }
+        }
+        if (opencl_.init(device_index)) return true;
+        log_info("GPU disabled: no usable GPU backend");
+        return false;
+    }
+    bool ok() const { return use_cuda_ ? cuda_.ok() : opencl_.ok(); }
+    bool filter(const std::vector<uint64_t>& primes, const WorkItem& item, std::vector<std::size_t>& todo) {
+        return use_cuda_ ? cuda_.filter(primes, item, todo) : opencl_.filter(primes, item, todo);
+    }
+
+private:
+    CudaSiever cuda_;
+    OpenClSiever opencl_;
+    bool use_cuda_ = false;
 };
 
 }  // namespace siever
