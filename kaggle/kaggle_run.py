@@ -34,6 +34,22 @@ def gpu_count():
         return 0
 
 
+def last_progress_line(log_path, tail_bytes=65536):
+    """Last "global x/y chunks" line of siever.log, read from the end of the file (the log can be large)."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - tail_bytes))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if "chunks (" in line:
+            return line.strip()
+    return lines[-1].strip() if lines else None
+
+
 def find_nvrtc():
     """Path of an NVRTC library for the CUDA backend (Kaggle ships it with the CUDA toolkit and pip)."""
     patterns = ["/usr/local/cuda*/lib64/libnvrtc.so*", "/usr/lib/x86_64-linux-gnu/libnvrtc.so*"]
@@ -104,6 +120,8 @@ def main():
                     help="CPU threads per worker (default: spread the free cores over the workers)")
     ap.add_argument("--backend", default="auto", choices=["auto", "cuda", "opencl"])
     ap.add_argument("--skip-self-test", action="store_true")
+    ap.add_argument("--report-minutes", type=float, default=30,
+                    help="print each worker's progress this often (0 = never)")
     ap.add_argument("--state", default="/kaggle/working/siever_state")
     ap.add_argument("--input", default="/kaggle/input")
     args = ap.parse_args()
@@ -169,13 +187,23 @@ def main():
         log = open(os.path.join(d, "stdout.txt"), "a")
         procs.append((slot, subprocess.Popen([BINARY], cwd=d, stdin=subprocess.DEVNULL,
                                               stdout=log, stderr=subprocess.STDOUT, env=env)))
-        print(f"{slot}: started")
+        print(f"{slot}: started", flush=True)
 
-    deadline = time.time() + args.hours * 3600
+    start = time.time()
+    deadline = start + args.hours * 3600
+    next_report = start + args.report_minutes * 60 if args.report_minutes > 0 else float("inf")
     while procs and time.time() < deadline:
         if all(p.poll() is not None for _, p in procs):
             break
         time.sleep(30)
+        if time.time() >= next_report:
+            elapsed = (time.time() - start) / 3600
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC, {elapsed:.1f} h]", flush=True)
+            for slot, p in procs:
+                state = "running" if p.poll() is None else f"exited ({p.returncode})"
+                line = last_progress_line(os.path.join(args.state, slot, "siever.log"))
+                print(f"  {slot} {state}: {line or 'no progress line yet'}", flush=True)
+            next_report += args.report_minutes * 60
     for slot, p in procs:
         if p.poll() is None:
             p.send_signal(signal.SIGINT)
