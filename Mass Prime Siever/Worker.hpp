@@ -112,10 +112,10 @@ private:
 
     static std::string format_percent(std::uint64_t completed, std::size_t total) {
         if (total == 0) {
-            return "100.0";
+            return "100.00";
         }
         std::ostringstream out;
-        out << std::fixed << std::setprecision(1)
+        out << std::fixed << std::setprecision(2)
             << (100.0 * static_cast<double>(completed) / static_cast<double>(total));
         return out.str();
     }

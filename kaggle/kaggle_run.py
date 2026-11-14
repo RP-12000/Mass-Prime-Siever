@@ -198,7 +198,7 @@ def main():
         time.sleep(30)
         if time.time() >= next_report:
             elapsed = (time.time() - start) / 3600
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC, {elapsed:.1f} h]", flush=True)
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC, {elapsed:.2f} h]", flush=True)
             for slot, p in procs:
                 state = "running" if p.poll() is None else f"exited ({p.returncode})"
                 line = last_progress_line(os.path.join(args.state, slot, "siever.log"))
