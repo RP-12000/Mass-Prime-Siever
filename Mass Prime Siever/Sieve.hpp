@@ -43,7 +43,7 @@ inline uint64_t sieve_limit_for(const WorkItem& item) {
     return std::max<uint64_t>(limit, 2);
 }
 
-// 12.1: cache-blocked odd-only sieve of [lo0, hi), hi < 2^63, lo0 > 3.  Small primes are marked per
+// 13.0: cache-blocked odd-only sieve of [lo0, hi), hi < 2^63, lo0 > 3.  Small primes are marked per
 // 128 KB segment from a saved offset; primes larger than a segment go through a bucket sieve, so every
 // write lands in the segment that is in L2.  Output is identical to the 12.0 loop (ascending primes).
 inline void segmented_sieve_blocked(uint64_t lo0, uint64_t hi, const std::vector<uint32_t>& small_primes,
@@ -121,7 +121,7 @@ inline void segmented_sieve(UInt128 low, UInt128 high, const std::vector<uint32_
             return;
         }
         if ((hi - lo + 1) / 2 < (1ULL << 32)) {
-            segmented_sieve_blocked(lo, hi, small_primes, primes_out);  // 12.1
+            segmented_sieve_blocked(lo, hi, small_primes, primes_out);  // 13.0
             return;
         }
         const uint64_t count = (hi - lo + 1) / 2;  // odd numbers lo, lo+2, ... < hi

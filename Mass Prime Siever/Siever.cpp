@@ -94,7 +94,7 @@ int main() {
         g_program_start = Clock::now();
         g_start_valid.store(true);
 
-        log_info("Mass Prime Siever 12.0 starting (November 11, 2026)");
+        log_info("Mass Prime Siever 13.0 starting (November 18, 2026)");
 
         Logger::instance().init("siever.log");
 

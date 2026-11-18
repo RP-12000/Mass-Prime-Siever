@@ -4,7 +4,21 @@ A sieve for exponential sequences `b^n + c` (for example `10^n + 111`, `10^n + 9
 For every prime `p` in `[P0, P1)` it finds all `n` in `[N0, N1)` with `p | b^n + c`, using a
 baby-step giant-step discrete log, and writes the surviving `n` (PRP candidates) to `results.json`.
 
-Current version: **12.0** (successor of Siever 11.2; same file formats, see `relations.p` below).
+Current version: **13.0** (successor of 12.0; same file formats, see `relations.p` below).
+
+## What's new in 13.0
+
+- **GPU kernel without single-lane work**: the BSGS is written as `G0 * (B^m)^g == t * B^i`
+  (`j = g*m - i`), so neither the setup nor the search needs a modular inverse, and everything the
+  lanes of a workgroup share is computed in the per-prime `prep` kernel. The quadratic-residue test
+  uses the Jacobi symbol instead of a modular power. GPU time about 2.6x lower.
+- **Cache-blocked prime sieve**: 128 KB segments plus a bucket sieve for the large primes, about
+  2.4x faster than the 12.0 loop, identical output.
+- **Several feeder threads per GPU** (`GPU_threads`, default 2): one thread sieves its next chunk on
+  the CPU while another one's chunk is on the GPU. `kaggle/kaggle_run.py --gpu-threads` (default 2)
+  gives the cores to the feeders (`CPU_count=0` on a 4-core, 2-GPU Kaggle machine).
+- Relations are identical to 12.0 and to the CPU path (checked on `2^n-25` with classes 2/1, 6/1 and
+  none, and on `10^n+111`).
 
 ## What's new in 12.0
 
@@ -50,6 +64,7 @@ CPU_count=15      # CPU worker threads (0 = GPU only, needs UseGPU=1)
 MemoryAllowed=64  # MB, sets the chunk size of the prime range
 UseGPU=1          # 1 = add an OpenCL GPU worker
 GPU_device=0      # index of the OpenCL GPU
+GPU_threads=2     # 13.0: feeder threads sharing the GPU
 ```
 
 ## Output
@@ -71,6 +86,17 @@ GPU_device=0      # index of the OpenCL GPU
 | 12.0, 16 CPU threads | 39.6 s |
 | 12.0, GPU only | 27.5 s |
 | 12.0, GPU + 15 CPU threads | 18.1 s |
+
+13.0 against 12.0 (same laptop, `2^n-25`, odd n = 3.6M-5M, p in [95T, 95T + 2e9)):
+
+| configuration | 12.0 | 13.0 |
+|---|---|---|
+| Radeon 780M only (13.0: `GPU_threads=2`) | 34.1 s | 9.9 s |
+| GPU + CPU threads (12.0: 15, 13.0: 14) | 21.3 s | 13.7 s |
+
+On the laptop 13.0 is fastest with the GPU alone (`CPU_count=0`): the integrated GPU shares power
+and memory bandwidth with the CPU cores. On Kaggle (2 x T4), p = 95T-100T took 1.8 h with 13.0
+against about 9 h with 12.0 for the same 5T at 90T-95T.
 
 ## Building
 

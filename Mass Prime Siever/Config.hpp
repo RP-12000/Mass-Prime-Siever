@@ -19,7 +19,7 @@ struct PrimeConfig {
     int use_gpu = 0;      // 11.4: UseGPU=1 adds an OpenCL GPU worker
     int gpu_device = 0;   // 11.4: GPU_device=index
     std::string gpu_backend = "auto";  // GPU_backend=auto|cuda|opencl
-    int gpu_threads = 2;  // 12.1: GPU_threads=N feeder threads share the GPU (sieve overlaps GPU work)
+    int gpu_threads = 2;  // 13.0: GPU_threads=N feeder threads share the GPU (sieve overlaps GPU work)
 };
 
 inline std::string trim(std::string value) {

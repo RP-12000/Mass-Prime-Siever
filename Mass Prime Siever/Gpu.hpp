@@ -190,7 +190,7 @@ KERNEL void bsgs(GLOBAL const u64* primes, GLOBAL uchar* flags, GLOBAL u32* tabl
     }
     flags[gid] = result;
 }
-// ---------------- 12.1: prep (filter + setup) then one workgroup per prime ----------------
+// ---------------- 13.0: prep (filter + setup) then one workgroup per prime ----------------
 // The equation is G0 * B^j == t (mod p), j in [0, jcount), with t = -c and G0 = b^n_start (times B for
 // the odd-k parity class).  Writing j = g*m - i (0 <= i < m, 0 <= g <= G) gives G0 * (B^m)^g == t * B^i,
 // so neither the setup nor the BSGS needs a modular inverse.  Everything shared by the lanes of a
@@ -583,7 +583,7 @@ public:
     }
     bool ok() const { return use_cuda_ ? cuda_.ok() : opencl_.ok(); }
     bool filter(const std::vector<uint64_t>& primes, const WorkItem& item, std::vector<std::size_t>& todo) {
-        std::lock_guard<std::mutex> lock(mutex_);  // 12.1: several feeder threads share one GPU
+        std::lock_guard<std::mutex> lock(mutex_);  // 13.0: several feeder threads share one GPU
         return use_cuda_ ? cuda_.filter(primes, item, todo) : opencl_.filter(primes, item, todo);
     }
 
