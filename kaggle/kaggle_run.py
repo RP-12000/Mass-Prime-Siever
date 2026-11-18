@@ -61,11 +61,12 @@ def find_nvrtc():
     return None
 
 
-def self_test(env, backend, scratch="/tmp/siever_selftest"):
+def self_test(env, backend, gpu_sieve=1, scratch="/tmp/siever_selftest"):
     """Sieve a small range on the GPU backend alone and on the CPU alone; the relations must match."""
     item = "Factor=2,-25,10000000000,10020000000,3600000,5000000,2,1\n"
     out = {}
-    for name, ini in (("gpu", f"CPU_count=0\nMemoryAllowed=16\nUseGPU=1\nGPU_device=0\nGPU_backend={backend}\n"),
+    for name, ini in (("gpu", f"CPU_count=0\nMemoryAllowed=16\nUseGPU=1\nGPU_device=0\nGPU_backend={backend}\n"
+                              f"GPU_threads=2\nGPU_sieve={gpu_sieve}\n"),
                       ("cpu", f"CPU_count={os.cpu_count() or 2}\nMemoryAllowed=16\nUseGPU=0\n")):
         d = os.path.join(scratch, name)
         shutil.rmtree(d, ignore_errors=True)
@@ -81,12 +82,22 @@ def self_test(env, backend, scratch="/tmp/siever_selftest"):
         if name == "gpu" and "GPU enabled" not in log:
             print("Self-test: no GPU backend came up; see", os.path.join(d, "siever.log"))
             return False
+        if name == "gpu" and gpu_sieve and ("GPU sieve disabled" in log or "sieve kernels unavailable" in log):
+            print("Self-test: the GPU sieve fell back to the CPU (slower); see", os.path.join(d, "siever.log"))
         rel = os.path.join(d, "relations.p")
         out[name] = sorted(open(rel).read().split("\n")) if os.path.exists(rel) else []
     ok = out["gpu"] == out["cpu"] and len(out["cpu"]) > 1
     print(f"Self-test ({backend}): GPU {len(out['gpu']) - 1} relations, CPU {len(out['cpu']) - 1} relations ->",
           "OK" if ok else "MISMATCH")
     return ok
+
+
+def update_ini(path, values):
+    """Set the given keys in a prime.ini, keeping every other line."""
+    lines = [l for l in open(path).read().splitlines() if l.split("=", 1)[0].strip() not in values]
+    lines += [f"{k}={v}" for k, v in values.items()]
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def restore(state_dir, input_root):
@@ -118,6 +129,8 @@ def main():
     ap.add_argument("--gpus", type=int, default=None, help="number of GPU workers (default: all)")
     ap.add_argument("--cpu-threads", type=int, default=None,
                     help="CPU threads per worker (default: spread the free cores over the workers)")
+    ap.add_argument("--gpu-sieve", type=int, default=1, choices=[0, 1],
+                    help="1 = generate the primes on the GPU too (13.1; the CPU stays nearly idle)")
     ap.add_argument("--gpu-threads", type=int, default=2,
                     help="feeder threads per GPU worker; one sieves on the CPU while another's chunk is on the GPU")
     ap.add_argument("--backend", default="auto", choices=["auto", "cuda", "opencl"])
@@ -155,11 +168,23 @@ def main():
                 f.write(line + "\n")
             with open(os.path.join(d, "prime.ini"), "w") as f:
                 f.write(f"CPU_count={cpu}\nMemoryAllowed=64\nUseGPU=1\nGPU_device={i}\nGPU_backend={args.backend}\n"
-                        f"GPU_threads={args.gpu_threads}\n")
+                        f"GPU_threads={args.gpu_threads}\nGPU_sieve={args.gpu_sieve}\n")
             print(f"gpu{i}: {line}  (CPU_count={cpu})")
         slots = sorted(d for d in os.listdir(args.state) if d.startswith("gpu"))
-    elif not restored:
-        print("Continuing state already in", args.state)
+    else:
+        if not restored:
+            print("Continuing state already in", args.state)
+        # 13.1: a state saved by an older version keeps its ranges and checkpoints, but runs with the
+        # current thread / GPU sieve settings.
+        n = len(slots)
+        cpu = args.cpu_threads
+        if cpu is None:
+            cpu = max(0, (os.cpu_count() or 2) - n * args.gpu_threads) // n
+        for slot in slots:
+            ini = os.path.join(args.state, slot, "prime.ini")
+            if os.path.exists(ini) and not os.path.exists(os.path.join(args.state, slot, "results.json")):
+                update_ini(ini, {"CPU_count": cpu, "GPU_threads": args.gpu_threads, "GPU_sieve": args.gpu_sieve})
+                print(f"{slot}: CPU_count={cpu}, GPU_threads={args.gpu_threads}, GPU_sieve={args.gpu_sieve}")
 
     env = dict(os.environ)
     if "SIEVER_NVRTC" not in env:
@@ -170,8 +195,8 @@ def main():
         else:
             print("NVRTC not found: the CUDA backend is off, OpenCL will be used")
 
-    if not args.skip_self_test and not self_test(env, args.backend):
-        if args.backend != "opencl" and self_test(env, "opencl"):
+    if not args.skip_self_test and not self_test(env, args.backend, args.gpu_sieve):
+        if args.backend != "opencl" and self_test(env, "opencl", args.gpu_sieve):
             print("Falling back to OpenCL for this session")
             for slot in slots:
                 ini = os.path.join(args.state, slot, "prime.ini")

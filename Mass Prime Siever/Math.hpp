@@ -240,7 +240,14 @@ inline bool is_prime64(uint64_t n) {
         return false;
     };
 
-    return check(2) && check(3) && check(5) && check(7) && check(11);
+    // 13.1: the 12 bases make the test exact for every 64-bit n (bases 2..11 alone are exact only
+    // below 2.15e12, and the GPU sieve hands numbers up to 2^62 to this test).
+    for (const uint64_t a : small_primes) {
+        if (!check(a)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 inline uint64_t pollard_rho(uint64_t n, std::mt19937_64& rng) {
@@ -300,6 +307,32 @@ inline uint64_t multiplicative_order(uint64_t base, uint64_t prime, std::mt19937
         }
     }
     return order;
+}
+
+// 13.1: prime generation on the GPU (psieve in Gpu.hpp).  These must match SV_ODDS and SV_WG there.
+constexpr uint64_t kGpuSieveSegOdds = 7680ULL * 32ULL;                   // SV_ODDS
+constexpr unsigned kGpuSieveWg = 256;                                    // SV_WG
+constexpr uint64_t kGpuSievePassOdds = 32ULL * kGpuSieveSegOdds;         // 32 segments per pass
+constexpr uint32_t kGpuSieveSurvCap = static_cast<uint32_t>(kGpuSievePassOdds / 4);
+constexpr uint32_t kGpuSieveEntCap = static_cast<uint32_t>(kGpuSievePassOdds / 8);
+
+// Odd primes 3 .. 65521 used by psieve; the first gpu_sieve_nsmall() of them are below 1024.
+inline const std::vector<uint32_t>& gpu_sieve_primes() {
+    static const std::vector<uint32_t> primes = [] {
+        std::vector<uint32_t> out;
+        std::vector<bool> composite(65536, false);
+        for (uint32_t i = 3; i < 65536; i += 2) {
+            if (composite[i]) continue;
+            out.push_back(i);
+            for (uint32_t j = i * i; j < 65536; j += 2 * i) composite[j] = true;
+        }
+        return out;
+    }();
+    return primes;
+}
+inline uint32_t gpu_sieve_nsmall() {
+    const std::vector<uint32_t>& p = gpu_sieve_primes();
+    return static_cast<uint32_t>(std::lower_bound(p.begin(), p.end(), 1024u) - p.begin());
 }
 
 struct Relation {

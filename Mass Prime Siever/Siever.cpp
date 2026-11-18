@@ -94,7 +94,7 @@ int main() {
         g_program_start = Clock::now();
         g_start_valid.store(true);
 
-        log_info("Mass Prime Siever 13.0 starting (November 18, 2026)");
+        log_info("Mass Prime Siever 13.1 starting (November 18, 2026)");
 
         Logger::instance().init("siever.log");
 
@@ -117,6 +117,8 @@ int main() {
         siever::GpuSiever* gpu_ptr = nullptr;
         if (config.use_gpu != 0 && gpu.init(config.gpu_device, config.gpu_backend)) {
             gpu_ptr = &gpu;
+            log_info("GPU_threads=" + std::to_string(config.gpu_threads) +
+                     (config.gpu_sieve != 0 ? ", GPU_sieve=1 (primes generated on the GPU)" : ", GPU_sieve=0"));
         }
         if (gpu_ptr == nullptr && config.cpu_count <= 0) {
             // CPU_count=0 means "GPU only"; without a GPU nothing would sieve and every n would
@@ -147,7 +149,7 @@ int main() {
             const std::vector<uint32_t> small_primes = sieve_small_primes(sieve_limit);
 
             run_worker_pool(item, config.cpu_count, config.memory_allowed_mb, small_primes, gpu_ptr,
-                            config.gpu_threads);
+                            config.gpu_threads, config.gpu_sieve != 0);
 
             if (shutdown_requested.load()) {
                 log_info("Shutdown: checkpoint preserved in core_*.p files");
@@ -169,7 +171,7 @@ int main() {
             log_final_status(item, candidates, item_elapsed);
             log_info("Finished work item " + std::to_string(work_index + 1));
 
-            for (int id = 0; id < config.cpu_count + config.gpu_threads; ++id) {
+            for (int id = 0; id < config.cpu_count + config.gpu_threads + 64; ++id) {
                 remove_file_if_exists("core_" + std::to_string(id) + ".p");
             }
         }

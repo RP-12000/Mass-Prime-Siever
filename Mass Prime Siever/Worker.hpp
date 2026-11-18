@@ -6,6 +6,7 @@
 #include "Sieve.hpp"
 #include "Types.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <chrono>
@@ -193,7 +194,7 @@ inline std::size_t enqueue_prime_chunks(const WorkItem& item, std::size_t chunk_
 
 inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const WorkItem& item,
                                  const std::vector<uint32_t>& small_primes, std::atomic<bool>& failed,
-                                 GpuSiever* gpu = nullptr) {
+                                 GpuSiever* gpu = nullptr, bool gpu_sieve = false) {
     if (failed.load()) {
         return 0;
     }
@@ -204,12 +205,30 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
     primes.reserve(1'000'000);
 
     try {
-        segmented_sieve(chunk.low, chunk.high, small_primes, primes);
+        bool sieved_on_gpu = false;
+        if (gpu != nullptr && gpu_sieve && chunk.high < (UInt128(1) << 62) && chunk.low > 3) {
+            // 13.1: the GPU generates the primes itself and returns only the numbers it could not rule
+            // out (a few primes, possibly a rare base-2 pseudoprime); the CPU checks them exactly below.
+            const uint64_t lo = static_cast<uint64_t>(chunk.low);
+            const uint64_t hi = static_cast<uint64_t>(chunk.high);
+            std::vector<uint64_t> flagged;
+            if (gpu->sieve_filter(lo, hi, item, flagged)) {
+                std::sort(flagged.begin(), flagged.end());
+                flagged.erase(std::unique(flagged.begin(), flagged.end()), flagged.end());
+                for (const uint64_t p : flagged) {
+                    if (p >= lo && p < hi && is_prime64(p)) primes.push_back(p);
+                }
+                sieved_on_gpu = true;
+            }
+        }
+        if (!sieved_on_gpu) {
+            segmented_sieve(chunk.low, chunk.high, small_primes, primes);
+        }
 
         std::mt19937_64 rng(static_cast<uint64_t>(thread_id + 1) ^
                             static_cast<uint64_t>(chunk.low & UInt128(0xFFFFFFFFFFFFFFFFULL)));
 
-        if (gpu != nullptr) {
+        if (gpu != nullptr && !sieved_on_gpu) {
             // 11.4: GPU pre-filter, exact CPU re-check of the (few) flagged primes.
             std::vector<std::size_t> todo;
             if (gpu->filter(primes, item, todo)) {
@@ -257,7 +276,7 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
 
 inline void run_worker_pool(const WorkItem& item, int cpu_count, int memory_allowed_mb,
                             const std::vector<uint32_t>& small_primes, GpuSiever* gpu = nullptr,
-                            int gpu_threads = 1) {
+                            int gpu_threads = 1, bool gpu_sieve = false) {
     ChunkQueue queue;
     const std::size_t chunk_size = worker_chunk_size_bytes(memory_allowed_mb, cpu_count);
     const std::size_t total_chunks = count_prime_chunks(item, chunk_size);
@@ -299,7 +318,7 @@ inline void run_worker_pool(const WorkItem& item, int cpu_count, int memory_allo
                     break;
                 }
                 const std::size_t relations_found =
-                    process_chunk(*chunk, gpu_id, item, small_primes, failed, gpu);
+                    process_chunk(*chunk, gpu_id, item, small_primes, failed, gpu, gpu_sieve);
                 if (!failed.load()) {
                     progress.on_chunk_complete(relations_found);
                 }
@@ -424,6 +443,8 @@ inline void merge_core_files(int cpu_count) {
     if (!merged) {
         log_fatal("Failed to create relations.p");
     }
+    // 13.1: also pick up core files of a resumed checkpoint written with more worker threads.
+    cpu_count += 64;
 
     for (int id = 0; id < cpu_count; ++id) {
         const std::string core_path = "core_" + std::to_string(id) + ".p";

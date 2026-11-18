@@ -212,7 +212,9 @@ public:
         shared_mem_ = static_cast<size_t>(shared);
         size_t total = 0;
         api_.cuDeviceTotalMem(&total, dev_);
-        if (api_.cuCtxCreate(&ctx_, 0, dev_) != 0) return fail("cuCtxCreate failed");
+        // 13.1: CU_CTX_SCHED_BLOCKING_SYNC (4): a thread waiting for the GPU sleeps instead of spinning,
+        // so the GPU workers leave the CPU (almost) idle.
+        if (api_.cuCtxCreate(&ctx_, 4u, dev_) != 0) return fail("cuCtxCreate failed");
 
         // Prefer a cubin for this exact GPU; fall back to PTX that the driver JIT-compiles.
         std::vector<char> image;
@@ -233,6 +235,13 @@ public:
         if (api_.cuModuleGetFunction(&k_prep_, module_, "prep") != 0 ||
             api_.cuModuleGetFunction(&k_wg_, module_, "bsgs_wg") != 0) {
             return fail("kernel lookup failed");
+        }
+        // 13.1: GPU prime generation; without these kernels sieve_filter() declines and the CPU sieves.
+        if (api_.cuModuleGetFunction(&k_psieve_, module_, "psieve") != 0 ||
+            api_.cuModuleGetFunction(&k_prepsv_, module_, "prep_sv") != 0 ||
+            api_.cuModuleGetFunction(&k_collect_, module_, "collect") != 0) {
+            log_info("CUDA: GPU sieve kernels unavailable, sieving on the CPU");
+            k_psieve_ = k_prepsv_ = k_collect_ = nullptr;
         }
         int nv_major = 0, nv_minor = 0;
         api_.nvrtcVersion(&nv_major, &nv_minor);
@@ -312,7 +321,92 @@ public:
         return true;
     }
 
+    // 13.1: same contract as OpenClSiever::sieve_filter (primes generated on the GPU).
+    bool sieve_filter(uint64_t lo0, uint64_t hi, const WorkItem& item, std::vector<uint64_t>& flagged) {
+        if (!ok_ || sv_broken_ || k_psieve_ == nullptr) return false;
+        const uint64_t lo = lo0 | 1ULL;
+        if (lo >= hi) return true;
+        api_.cuCtxSetCurrent(ctx_);
+        const uint64_t count = (hi - lo + 1) / 2;
+        const uint64_t N0 = item.N0 < 0 ? 0 : to_uint64(item.N0);
+        const uint64_t N1 = to_uint64(item.N1);
+        const uint64_t cm = item.cls_mod == 0 ? 1 : item.cls_mod;
+        const uint64_t kmax = (N1 - N0) / cm + 2;
+        const uint64_t m = static_cast<uint64_t>(std::sqrt(static_cast<double>(kmax))) + 2;
+        unsigned tbits = 4;
+        while ((1ULL << tbits) < m + m / 4) ++tbits;
+        const size_t lbytes = (size_t(1) << tbits) * sizeof(uint32_t);
+        if (lbytes + 1024 > shared_mem_ || tbits > 14) return false;
+        unsigned int cap = kGpuSieveSurvCap, ent_cap = kGpuSieveEntCap;
+        const std::vector<uint32_t>& sp = gpu_sieve_primes();
+        if (!sv_ready_) {
+            if (api_.cuMemAlloc(&d_sp_, sp.size() * sizeof(uint32_t)) != 0 ||
+                api_.cuMemAlloc(&d_surv_, size_t(cap) * sizeof(uint64_t)) != 0 ||
+                api_.cuMemAlloc(&d_sflags_, cap) != 0 ||
+                api_.cuMemAlloc(&d_sent_, size_t(ent_cap) * 11 * sizeof(uint64_t)) != 0 ||
+                api_.cuMemAlloc(&d_out_, size_t(cap) * sizeof(uint64_t)) != 0 ||
+                api_.cuMemAlloc(&d_cnt3_, 3 * sizeof(uint32_t)) != 0 ||
+                api_.cuMemcpyHtoD(d_sp_, sp.data(), sp.size() * sizeof(uint32_t)) != 0) {
+                return sv_fail("buffer setup");
+            }
+            sv_ready_ = true;
+        }
+        unsigned int nsp = static_cast<unsigned int>(sp.size()), nsmall = gpu_sieve_nsmall();
+        unsigned long long b = to_uint64(item.b);
+        long long c = static_cast<long long>(item.c);
+        unsigned long long n0 = N0, n1 = N1, cmod = cm, cres = item.cls_res;
+        unsigned int tb = tbits;
+        cudadyn::CUdeviceptr d_scnt = d_cnt3_, d_ecnt = d_cnt3_ + 4, d_ocnt = d_cnt3_ + 8;
+        std::vector<uint64_t> buf;
+        for (uint64_t pb = 0; pb < count; pb += kGpuSievePassOdds) {
+            unsigned long long pc = std::min<uint64_t>(kGpuSievePassOdds, count - pb);
+            unsigned long long plo = lo + 2 * pb;
+            if (api_.cuMemsetD32(d_cnt3_, 0, 3) != 0) return sv_fail("counter reset");
+            void* sv_args[] = {&plo, &pc, &d_sp_, &nsp, &nsmall, &d_surv_, &d_scnt, &cap};
+            const unsigned groups = static_cast<unsigned>((pc + kGpuSieveSegOdds - 1) / kGpuSieveSegOdds);
+            if (api_.cuLaunchKernel(k_psieve_, groups, 1, 1, kGpuSieveWg, 1, 1, 0, nullptr, sv_args, nullptr) != 0) {
+                return sv_fail("psieve launch");
+            }
+            unsigned int n = 0;
+            if (api_.cuMemcpyDtoH(&n, d_scnt, sizeof(n)) != 0) return sv_fail("survivor count");
+            if (n > cap) return false;  // more survivors than the buffer holds (only for tiny p): CPU path
+            if (n == 0) continue;
+            void* prep_args[] = {&d_surv_, &d_sflags_, &d_sent_, &d_ecnt, &ent_cap, &b, &c, &n0, &n1, &cmod, &cres, &n};
+            const unsigned blocks = (n + 63) / 64;
+            if (api_.cuLaunchKernel(k_prepsv_, blocks, 1, 1, 64, 1, 1, 0, nullptr, prep_args, nullptr) != 0) {
+                return sv_fail("prep_sv launch");
+            }
+            unsigned int n_ent = 0;
+            if (api_.cuMemcpyDtoH(&n_ent, d_ecnt, sizeof(n_ent)) != 0) return sv_fail("entry count");
+            n_ent = std::min(n_ent, ent_cap);  // entries past ent_cap were flagged 2 (CPU) by prep_sv
+            if (n_ent > 0) {
+                void* wg_args[] = {&d_sent_, &d_sflags_, &tb};
+                if (api_.cuLaunchKernel(k_wg_, n_ent, 1, 1, 64, 1, 1, static_cast<unsigned>(lbytes), nullptr, wg_args,
+                                        nullptr) != 0) {
+                    return sv_fail("bsgs_wg launch");
+                }
+            }
+            void* col_args[] = {&d_surv_, &d_sflags_, &n, &d_out_, &d_ocnt};
+            if (api_.cuLaunchKernel(k_collect_, blocks, 1, 1, 64, 1, 1, 0, nullptr, col_args, nullptr) != 0) {
+                return sv_fail("collect launch");
+            }
+            unsigned int n_out = 0;
+            if (api_.cuMemcpyDtoH(&n_out, d_ocnt, sizeof(n_out)) != 0) return sv_fail("flag count");
+            if (n_out > 0) {
+                buf.resize(n_out);
+                if (api_.cuMemcpyDtoH(buf.data(), d_out_, buf.size() * sizeof(uint64_t)) != 0) return sv_fail("flag read");
+                flagged.insert(flagged.end(), buf.begin(), buf.end());
+            }
+        }
+        return true;
+    }
+
 private:
+    bool sv_fail(const char* what) {
+        log_info(std::string("CUDA GPU sieve disabled (") + what + "), sieving on the CPU");
+        sv_broken_ = true;
+        return false;
+    }
     void release() {
         if (d_ent_) api_.cuMemFree(d_ent_);
         if (d_cnt_) api_.cuMemFree(d_cnt_);
@@ -338,6 +432,10 @@ private:
     size_t shared_mem_ = 0;
     cudadyn::CUdeviceptr d_ent_ = 0, d_cnt_ = 0, d_primes_ = 0, d_flags_ = 0;
     size_t cap_ = 0;
+    // 13.1 GPU sieve
+    cudadyn::CUfunction k_psieve_ = nullptr, k_prepsv_ = nullptr, k_collect_ = nullptr;
+    cudadyn::CUdeviceptr d_sp_ = 0, d_surv_ = 0, d_sflags_ = 0, d_sent_ = 0, d_out_ = 0, d_cnt3_ = 0;
+    bool sv_ready_ = false, sv_broken_ = false;
 };
 
 }  // namespace siever
