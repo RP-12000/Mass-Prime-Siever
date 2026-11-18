@@ -267,7 +267,7 @@ DEVICE_BIG_FN void prep_core(const u64 p, const u32 gid, const int need_prime, G
     const u64 ninv = 0UL - inv;
     const u64 one = (0UL - p) % p;
     if (need_prime) {
-        // 13.1: base-2 Fermat test for sieve survivors.  A prime always passes; the few
+        // 14.0: base-2 Fermat test for sieve survivors.  A prime always passes; the few
         // pseudoprimes that also pass are rejected by the exact CPU check of flagged numbers.
         const u64 e = p - 1UL;
         int k = 63;
@@ -316,7 +316,7 @@ KERNEL void prep(GLOBAL const u64* primes, GLOBAL uchar* flags, GLOBAL u64* ent,
     prep_core(primes[gid], gid, 0, flags, ent, ent_count, 0xFFFFFFFFu, b, c, N0, N1, cm, cres);
 }
 
-// 13.1: same as prep, for the survivors of psieve (Fermat test included).
+// 14.0: same as prep, for the survivors of psieve (Fermat test included).
 KERNEL void prep_sv(GLOBAL const u64* surv, GLOBAL uchar* flags, GLOBAL u64* ent,
                       GLOBAL volatile uint* ent_count, const uint ent_cap,
                       const u64 b, const i64 c, const u64 N0, const u64 N1,
@@ -382,7 +382,7 @@ KERNEL void bsgs_wg(GLOBAL const u64* ent, GLOBAL uchar* flags, const u32 tbits
     if (lid == 0 && hit) flags[idx] = 1;
 }
 
-// ---------------- 13.1: prime generation on the GPU ----------------
+// ---------------- 14.0: prime generation on the GPU ----------------
 // psieve: one workgroup per segment of SV_ODDS odd numbers v0, v0+2, ... (bitmap in local memory),
 // crossed off with the odd primes in sp[] (3 .. 65521).  The survivors (no factor <= 65521) go to
 // surv[]; prep_sv then Fermat-tests them.  A prime is never crossed off: marking starts at
@@ -454,7 +454,7 @@ KERNEL void psieve(const u64 lo, const u64 count, GLOBAL const uint* sp, const u
     }
 }
 
-// 13.1: the numbers the GPU could not rule out (flags 1 or 2) -> out[].
+// 14.0: the numbers the GPU could not rule out (flags 1 or 2) -> out[].
 KERNEL void collect(GLOBAL const u64* list, GLOBAL const uchar* flags, const u32 count,
                       GLOBAL u64* out, GLOBAL volatile uint* out_count) {
     const u32 gid = GLOBAL_ID();
@@ -462,7 +462,7 @@ KERNEL void collect(GLOBAL const u64* list, GLOBAL const uchar* flags, const u32
     if (flags[gid] != 0) out[ATOMIC_INC(out_count)] = list[gid];
 }
 
-// ---------------- 13.1: per-prime residue classes (GPU sieve path) ----------------
+// ---------------- 14.0: per-prime residue classes (GPU sieve path) ----------------
 // For a prime p let g = gcd(Qmax, p - 1) (Qmax = lcm(cm, 24)) and Qp = lcm(cm, g).  The in-class n
 // split into the classes n == r_j (mod Qp).  B = b^Qp is a g-th power residue, so class j can only
 // hold a solution if T_j = t * b^-n_j is one too: t^e == (b^e)^n_j, e = (p - 1) / g.  Most primes
@@ -701,7 +701,7 @@ public:
         if (err != CL_SUCCESS) return fail("clCreateKernel prep " + std::to_string(err));
         k_wg_ = clCreateKernel(prog_, "bsgs_wg", &err);
         if (err != CL_SUCCESS) return fail("clCreateKernel bsgs_wg " + std::to_string(err));
-        // 13.1: GPU prime generation; without these kernels sieve_filter() declines and the CPU sieves.
+        // 14.0: GPU prime generation; without these kernels sieve_filter() declines and the CPU sieves.
         k_psieve_ = clCreateKernel(prog_, "psieve", &err);
         if (err == CL_SUCCESS) k_prepsv_ = clCreateKernel(prog_, "prep_sv", &err);
         if (err == CL_SUCCESS) k_collect_ = clCreateKernel(prog_, "collect", &err);
@@ -850,7 +850,7 @@ public:
         return true;
     }
 
-    // 13.1: the primes of [lo0, hi) are generated on the GPU (psieve, then a Fermat test in prep_sv) and
+    // 14.0: the primes of [lo0, hi) are generated on the GPU (psieve, then a Fermat test in prep_sv) and
     // filtered like filter().  The numbers the GPU could not rule out are appended to `flagged`; they
     // can include a few composites, so the caller checks primality.  Returns false when this chunk has
     // to take the CPU path (no sieve kernels, BSGS table too large, buffer overflow, OpenCL error).
@@ -862,7 +862,7 @@ public:
         const uint64_t N0 = item.N0 < 0 ? 0 : to_uint64(item.N0);
         const uint64_t N1 = to_uint64(item.N1);
         const uint64_t cm = item.cls_mod == 0 ? 1 : item.cls_mod;
-        // 13.1: residue classes mod Q (all in-class residues are searched, so results are unchanged)
+        // 14.0: residue classes mod Q (all in-class residues are searched, so results are unchanged)
         uint64_t Qc = 0;
         std::vector<uint32_t> classes;
         const bool qmode = use_classes_ && k_prepsvq_ != nullptr && gpu_classes(item, Qc, classes);
@@ -1025,7 +1025,7 @@ private:
     cl_mem d_primes_ = nullptr, d_flags_ = nullptr, d_tables_ = nullptr;
     size_t batch_ = 0, table_bytes_ = 0;
     cl_ulong max_alloc_ = 0;
-    // 13.1 GPU sieve
+    // 14.0 GPU sieve
     cl_kernel k_psieve_ = nullptr, k_prepsv_ = nullptr, k_collect_ = nullptr;
     cl_mem d_sp_ = nullptr, d_surv_ = nullptr, d_sflags_ = nullptr, d_sent_ = nullptr, d_out_ = nullptr;
     cl_mem d_scnt_ = nullptr, d_ecnt_ = nullptr, d_ocnt_ = nullptr;
@@ -1059,7 +1059,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);  // 13.0: several feeder threads share one GPU
         return use_cuda_ ? cuda_.filter(primes, item, todo) : opencl_.filter(primes, item, todo);
     }
-    // 13.1: prime generation + filter on the GPU (see OpenClSiever::sieve_filter).
+    // 14.0: prime generation + filter on the GPU (see OpenClSiever::sieve_filter).
     void set_classes(bool on) { cuda_.use_classes_ = on; opencl_.use_classes_ = on; }
     bool sieve_filter(uint64_t lo, uint64_t hi, const WorkItem& item, std::vector<uint64_t>& flagged) {
         std::lock_guard<std::mutex> lock(mutex_);

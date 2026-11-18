@@ -4,9 +4,10 @@ A sieve for exponential sequences `b^n + c` (for example `10^n + 111`, `10^n + 9
 For every prime `p` in `[P0, P1)` it finds all `n` in `[N0, N1)` with `p | b^n + c`, using a
 baby-step giant-step discrete log, and writes the surviving `n` (PRP candidates) to `results.json`.
 
-Current version: **13.1** (successor of 13.0; same file formats, see `relations.p` below).
+Current version: **14.0** (successor of 13.0, via the intermediate 13.1 = GPU sieve only; same file
+formats, see `relations.p` below).
 
-## What's new in 13.1
+## What's new in 14.0
 
 - **Prime generation on the GPU** (`GPU_sieve=1`): each GPU workgroup sieves a 30 KB segment of odd
   numbers with the primes below 65536 in local memory, the survivors get a base-2 Fermat test in the
@@ -92,9 +93,9 @@ MemoryAllowed=64  # MB, sets the chunk size of the prime range
 UseGPU=1          # 1 = add an OpenCL GPU worker
 GPU_device=0      # index of the OpenCL GPU
 GPU_threads=2     # 13.0: feeder threads sharing the GPU
-GPU_sieve=0       # 13.1: 1 = generate the primes on the GPU too (for weak CPUs, e.g. Kaggle)
-GPU_classes=1     # 13.1: residue classes per prime on the GPU sieve path (0 = off)
-GPU_strict=0      # 13.1: 1 = stop instead of falling back to CPU sieving (kaggle_run.py sets it)
+GPU_sieve=0       # 14.0: 1 = generate the primes on the GPU too (for weak CPUs, e.g. Kaggle)
+GPU_classes=1     # 14.0: residue classes per prime on the GPU sieve path (0 = off)
+GPU_strict=0      # 14.0: 1 = stop instead of falling back to CPU sieving (kaggle_run.py sets it)
 ```
 
 ## Output
@@ -128,15 +129,18 @@ On the laptop 13.0 is fastest with the GPU alone (`CPU_count=0`): the integrated
 and memory bandwidth with the CPU cores. On Kaggle (2 x T4), p = 95T-100T took 1.8 h with 13.0
 against about 9 h with 12.0 for the same 5T at 90T-95T.
 
-13.1 with `GPU_sieve=1` on the same laptop range (GPU only, `GPU_threads=2`):
+14.0 on the same laptop range (GPU only, `GPU_threads=2`; 13.1 = GPU sieve without classes). The
+two blocks were measured in different sessions (the laptop was warmer in the second):
 
 | configuration | 13.0 | 13.1 `GPU_sieve=1` |
 |---|---|---|
 | all 16 logical CPUs available | 10.1 s, 4.7 s CPU time | 10.3 s, 0.9 s CPU time |
 | process limited to 1 logical CPU | 15.0 s | 10.4 s |
 
-With `GPU_classes=1` (later measurement, laptop warmer: 13.0 took 13.3 s here) the same range takes
-8.5 s against 12.7 s for 13.1 without classes.
+| configuration | 13.0 | 13.1 | 14.0 (`GPU_sieve=1`, `GPU_classes=1`) |
+|---|---|---|---|
+| all 16 logical CPUs available | 12.7 / 13.3 s, 10.3 s CPU | 12.8 / 13.2 s, 1.6 s CPU | 8.6 / 8.9 s, 1.7 s CPU |
+| process limited to 1 logical CPU | 18.9 s | | 8.8 s |
 
 The second row is the situation of a fast GPU next to a slow CPU, as on Kaggle, where 13.0 spent
 about 0.18 s per 64 MB chunk mostly waiting for the CPU sieve.

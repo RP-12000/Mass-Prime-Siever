@@ -212,7 +212,7 @@ public:
         shared_mem_ = static_cast<size_t>(shared);
         size_t total = 0;
         api_.cuDeviceTotalMem(&total, dev_);
-        // 13.1: CU_CTX_SCHED_BLOCKING_SYNC (4): a thread waiting for the GPU sleeps instead of spinning,
+        // 14.0: CU_CTX_SCHED_BLOCKING_SYNC (4): a thread waiting for the GPU sleeps instead of spinning,
         // so the GPU workers leave the CPU (almost) idle.
         if (api_.cuCtxCreate(&ctx_, 4u, dev_) != 0) return fail("cuCtxCreate failed");
 
@@ -236,7 +236,7 @@ public:
             api_.cuModuleGetFunction(&k_wg_, module_, "bsgs_wg") != 0) {
             return fail("kernel lookup failed");
         }
-        // 13.1: GPU prime generation; without these kernels sieve_filter() declines and the CPU sieves.
+        // 14.0: GPU prime generation; without these kernels sieve_filter() declines and the CPU sieves.
         if (api_.cuModuleGetFunction(&k_psieve_, module_, "psieve") != 0 ||
             api_.cuModuleGetFunction(&k_prepsv_, module_, "prep_sv") != 0 ||
             api_.cuModuleGetFunction(&k_collect_, module_, "collect") != 0) {
@@ -325,7 +325,7 @@ public:
         return true;
     }
 
-    // 13.1: same contract as OpenClSiever::sieve_filter (primes generated on the GPU).
+    // 14.0: same contract as OpenClSiever::sieve_filter (primes generated on the GPU).
     bool sieve_filter(uint64_t lo0, uint64_t hi, const WorkItem& item, std::vector<uint64_t>& flagged) {
         if (!ok_ || sv_broken_ || k_psieve_ == nullptr) return false;
         const uint64_t lo = lo0 | 1ULL;
@@ -335,7 +335,7 @@ public:
         const uint64_t N0 = item.N0 < 0 ? 0 : to_uint64(item.N0);
         const uint64_t N1 = to_uint64(item.N1);
         const uint64_t cm = item.cls_mod == 0 ? 1 : item.cls_mod;
-        // 13.1: residue classes mod Q (all in-class residues are searched, so results are unchanged)
+        // 14.0: residue classes mod Q (all in-class residues are searched, so results are unchanged)
         uint64_t Qc = 0;
         std::vector<uint32_t> classes;
         const bool qmode = use_classes_ && k_prepsvq_ != nullptr && gpu_classes(item, Qc, classes);
@@ -445,7 +445,7 @@ private:
     size_t shared_mem_ = 0;
     cudadyn::CUdeviceptr d_ent_ = 0, d_cnt_ = 0, d_primes_ = 0, d_flags_ = 0;
     size_t cap_ = 0;
-    // 13.1 GPU sieve
+    // 14.0 GPU sieve
     cudadyn::CUfunction k_psieve_ = nullptr, k_prepsv_ = nullptr, k_collect_ = nullptr;
     cudadyn::CUdeviceptr d_sp_ = 0, d_surv_ = 0, d_sflags_ = 0, d_sent_ = 0, d_out_ = 0, d_cnt3_ = 0;
     bool sv_ready_ = false, sv_broken_ = false;

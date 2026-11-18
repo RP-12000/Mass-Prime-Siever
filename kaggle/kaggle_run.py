@@ -178,7 +178,7 @@ def main():
     else:
         if not restored:
             print("Continuing state already in", args.state)
-        # 13.1: a state saved by an older version keeps its ranges and checkpoints, but runs with the
+        # 14.0: a state saved by an older version keeps its ranges and checkpoints, but runs with the
         # current thread / GPU sieve settings.
         n = len(slots)
         cpu = args.cpu_threads

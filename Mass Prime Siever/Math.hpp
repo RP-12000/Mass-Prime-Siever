@@ -240,7 +240,7 @@ inline bool is_prime64(uint64_t n) {
         return false;
     };
 
-    // 13.1: the 12 bases make the test exact for every 64-bit n (bases 2..11 alone are exact only
+    // 14.0: the 12 bases make the test exact for every 64-bit n (bases 2..11 alone are exact only
     // below 2.15e12, and the GPU sieve hands numbers up to 2^62 to this test).
     for (const uint64_t a : small_primes) {
         if (!check(a)) {
@@ -309,7 +309,7 @@ inline uint64_t multiplicative_order(uint64_t base, uint64_t prime, std::mt19937
     return order;
 }
 
-// 13.1: prime generation on the GPU (psieve in Gpu.hpp).  These must match SV_ODDS and SV_WG there.
+// 14.0: prime generation on the GPU (psieve in Gpu.hpp).  These must match SV_ODDS and SV_WG there.
 constexpr uint64_t kGpuSieveSegOdds = 7680ULL * 32ULL;                   // SV_ODDS
 constexpr unsigned kGpuSieveWg = 256;                                    // SV_WG
 constexpr uint64_t kGpuSievePassOdds = 32ULL * kGpuSieveSegOdds;         // 32 segments per pass
@@ -319,7 +319,7 @@ constexpr uint32_t kGpuSieveEntCapQ = static_cast<uint32_t>(kGpuSievePassOdds / 
 // bytes of the entry buffer: room for either layout (ENT = 11 or ENTQ = 36 u64 per entry)
 constexpr size_t kGpuSieveEntBytes = (size_t(kGpuSieveEntCap) * 11 > size_t(kGpuSieveEntCapQ) * 36 ? size_t(kGpuSieveEntCap) * 11 : size_t(kGpuSieveEntCapQ) * 36) * sizeof(uint64_t);
 
-// 13.1: residue classes for the GPU sieve path.  Q = lcm(cm, 24) is the largest class modulus; each
+// 14.0: residue classes for the GPU sieve path.  Q = lcm(cm, 24) is the largest class modulus; each
 // prime splits the in-class n by lcm(cm, gcd(Q, p - 1)) on the GPU (MAXC = 24 in Gpu.hpp).
 inline bool gpu_classes(const WorkItem& item, uint64_t& Q, std::vector<uint32_t>& classes) {
     const uint64_t cm = item.cls_mod == 0 ? 1 : item.cls_mod;

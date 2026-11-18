@@ -94,7 +94,7 @@ int main() {
         g_program_start = Clock::now();
         g_start_valid.store(true);
 
-        log_info("Mass Prime Siever 13.1 starting (November 18, 2026)");
+        log_info("Mass Prime Siever 14.0 starting (November 18, 2026)");
 
         Logger::instance().init("siever.log");
 
@@ -124,7 +124,7 @@ int main() {
                      ", GPU_strict=" + std::to_string(config.gpu_strict));
         }
         if (gpu_ptr == nullptr && config.gpu_strict != 0) {
-            // 13.1: GPU_strict=1 (Kaggle) never sieves on the CPU instead.
+            // 14.0: GPU_strict=1 (Kaggle) never sieves on the CPU instead.
             log_fatal("GPU_strict=1 but no usable GPU backend; not sieving on the CPU");
         }
         if (gpu_ptr == nullptr && config.cpu_count <= 0) {

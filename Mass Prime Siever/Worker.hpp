@@ -214,7 +214,7 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
             return 0;
         }
         if (gpu != nullptr && gpu_sieve && gpu_range_ok) {
-            // 13.1: the GPU generates the primes itself and returns only the numbers it could not rule
+            // 14.0: the GPU generates the primes itself and returns only the numbers it could not rule
             // out (a few primes, possibly a rare base-2 pseudoprime); the CPU checks them exactly below.
             const uint64_t lo = static_cast<uint64_t>(chunk.low);
             const uint64_t hi = static_cast<uint64_t>(chunk.high);
@@ -227,7 +227,7 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
                 }
                 sieved_on_gpu = true;
             } else if (gpu_strict) {
-                // 13.1: GPU_strict=1 (Kaggle): never fall back to heavy CPU work; stop, the checkpoint
+                // 14.0: GPU_strict=1 (Kaggle): never fall back to heavy CPU work; stop, the checkpoint
                 // keeps every finished chunk.
                 log_info("GPU_strict=1: the GPU sieve declined the chunk starting at " + std::to_string(lo) +
                          "; stopping instead of sieving on the CPU");
@@ -471,7 +471,7 @@ inline void merge_core_files(int cpu_count) {
     if (!merged) {
         log_fatal("Failed to create relations.p");
     }
-    // 13.1: also pick up core files of a resumed checkpoint written with more worker threads.
+    // 14.0: also pick up core files of a resumed checkpoint written with more worker threads.
     cpu_count += 64;
 
     for (int id = 0; id < cpu_count; ++id) {
