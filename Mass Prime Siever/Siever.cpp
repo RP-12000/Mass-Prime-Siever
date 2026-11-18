@@ -120,7 +120,12 @@ int main() {
             gpu.set_classes(config.gpu_classes != 0);
             log_info("GPU_threads=" + std::to_string(config.gpu_threads) +
                      (config.gpu_sieve != 0 ? ", GPU_sieve=1 (primes generated on the GPU)" : ", GPU_sieve=0") +
-                     ", GPU_classes=" + std::to_string(config.gpu_classes));
+                     ", GPU_classes=" + std::to_string(config.gpu_classes) +
+                     ", GPU_strict=" + std::to_string(config.gpu_strict));
+        }
+        if (gpu_ptr == nullptr && config.gpu_strict != 0) {
+            // 13.1: GPU_strict=1 (Kaggle) never sieves on the CPU instead.
+            log_fatal("GPU_strict=1 but no usable GPU backend; not sieving on the CPU");
         }
         if (gpu_ptr == nullptr && config.cpu_count <= 0) {
             // CPU_count=0 means "GPU only"; without a GPU nothing would sieve and every n would
@@ -151,7 +156,7 @@ int main() {
             const std::vector<uint32_t> small_primes = sieve_small_primes(sieve_limit);
 
             run_worker_pool(item, config.cpu_count, config.memory_allowed_mb, small_primes, gpu_ptr,
-                            config.gpu_threads, config.gpu_sieve != 0);
+                            config.gpu_threads, config.gpu_sieve != 0, config.gpu_strict != 0);
 
             if (shutdown_requested.load()) {
                 log_info("Shutdown: checkpoint preserved in core_*.p files");

@@ -21,6 +21,9 @@ Current version: **13.1** (successor of 13.0; same file formats, see `relations.
   their surviving classes with a shared baby-step table. Every class is covered, so the relations do
   not change. About 1.5x less GPU time on 2^n-25 at p = 95T.
 - CUDA waits for the GPU with a blocking sync instead of spinning, so a GPU worker leaves the CPU idle.
+- `GPU_strict=1`: if there is no usable GPU, or the GPU sieve or filter cannot take a chunk, the
+  siever stops (exit code 1, finished chunks stay in the checkpoint) instead of doing that work on the
+  CPU. `kaggle_run.py` sets it together with `GPU_sieve=1`.
 - `is_prime64` uses the 12 bases 2..37 and is exact for all 64-bit numbers (bases 2..11 are exact
   only below 2.15e12).
 - `kaggle/kaggle_run.py`: `--gpu-sieve` (default 1); a state saved by an older version is resumed
@@ -91,6 +94,7 @@ GPU_device=0      # index of the OpenCL GPU
 GPU_threads=2     # 13.0: feeder threads sharing the GPU
 GPU_sieve=0       # 13.1: 1 = generate the primes on the GPU too (for weak CPUs, e.g. Kaggle)
 GPU_classes=1     # 13.1: residue classes per prime on the GPU sieve path (0 = off)
+GPU_strict=0      # 13.1: 1 = stop instead of falling back to CPU sieving (kaggle_run.py sets it)
 ```
 
 ## Output

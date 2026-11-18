@@ -194,7 +194,7 @@ inline std::size_t enqueue_prime_chunks(const WorkItem& item, std::size_t chunk_
 
 inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const WorkItem& item,
                                  const std::vector<uint32_t>& small_primes, std::atomic<bool>& failed,
-                                 GpuSiever* gpu = nullptr, bool gpu_sieve = false) {
+                                 GpuSiever* gpu = nullptr, bool gpu_sieve = false, bool gpu_strict = false) {
     if (failed.load()) {
         return 0;
     }
@@ -206,7 +206,14 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
 
     try {
         bool sieved_on_gpu = false;
-        if (gpu != nullptr && gpu_sieve && chunk.high < (UInt128(1) << 62) && chunk.low > 3) {
+        const bool gpu_range_ok = chunk.high < (UInt128(1) << 62) && chunk.low > 3;
+        if (gpu != nullptr && gpu_sieve && gpu_strict && !gpu_range_ok) {
+            log_info("GPU_strict=1: chunk starting at " + to_string(chunk.low) +
+                     " cannot be sieved on the GPU; stopping instead of sieving on the CPU");
+            failed.store(true);
+            return 0;
+        }
+        if (gpu != nullptr && gpu_sieve && gpu_range_ok) {
             // 13.1: the GPU generates the primes itself and returns only the numbers it could not rule
             // out (a few primes, possibly a rare base-2 pseudoprime); the CPU checks them exactly below.
             const uint64_t lo = static_cast<uint64_t>(chunk.low);
@@ -219,6 +226,13 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
                     if (p >= lo && p < hi && is_prime64(p)) primes.push_back(p);
                 }
                 sieved_on_gpu = true;
+            } else if (gpu_strict) {
+                // 13.1: GPU_strict=1 (Kaggle): never fall back to heavy CPU work; stop, the checkpoint
+                // keeps every finished chunk.
+                log_info("GPU_strict=1: the GPU sieve declined the chunk starting at " + std::to_string(lo) +
+                         "; stopping instead of sieving on the CPU");
+                failed.store(true);
+                return 0;
             } else {
                 static std::atomic<int> declined{0};
                 if (declined.fetch_add(1) < 3) {
@@ -241,6 +255,10 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
                 flagged.reserve(todo.size());
                 for (const std::size_t i : todo) flagged.push_back(primes[i]);
                 primes.swap(flagged);
+            } else if (gpu_strict) {
+                log_info("GPU_strict=1: the GPU filter failed; stopping instead of checking every prime on the CPU");
+                failed.store(true);
+                return 0;
             } else {
                 static std::atomic<int> unfiltered{0};
                 if (unfiltered.fetch_add(1) < 3) {
@@ -286,7 +304,7 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
 
 inline void run_worker_pool(const WorkItem& item, int cpu_count, int memory_allowed_mb,
                             const std::vector<uint32_t>& small_primes, GpuSiever* gpu = nullptr,
-                            int gpu_threads = 1, bool gpu_sieve = false) {
+                            int gpu_threads = 1, bool gpu_sieve = false, bool gpu_strict = false) {
     ChunkQueue queue;
     const std::size_t chunk_size = worker_chunk_size_bytes(memory_allowed_mb, cpu_count);
     const std::size_t total_chunks = count_prime_chunks(item, chunk_size);
@@ -328,7 +346,7 @@ inline void run_worker_pool(const WorkItem& item, int cpu_count, int memory_allo
                     break;
                 }
                 const std::size_t relations_found =
-                    process_chunk(*chunk, gpu_id, item, small_primes, failed, gpu, gpu_sieve);
+                    process_chunk(*chunk, gpu_id, item, small_primes, failed, gpu, gpu_sieve, gpu_strict);
                 if (!failed.load()) {
                     progress.on_chunk_complete(relations_found);
                 }

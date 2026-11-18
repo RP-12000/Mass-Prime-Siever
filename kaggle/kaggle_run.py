@@ -66,7 +66,7 @@ def self_test(env, backend, gpu_sieve=1, scratch="/tmp/siever_selftest"):
     item = "Factor=2,-25,10000000000,10020000000,3600000,5000000,2,1\n"
     out = {}
     for name, ini in (("gpu", f"CPU_count=0\nMemoryAllowed=16\nUseGPU=1\nGPU_device=0\nGPU_backend={backend}\n"
-                              f"GPU_threads=2\nGPU_sieve={gpu_sieve}\n"),
+                              f"GPU_threads=2\nGPU_sieve={gpu_sieve}\nGPU_strict={gpu_sieve}\n"),
                       ("cpu", f"CPU_count={os.cpu_count() or 2}\nMemoryAllowed=16\nUseGPU=0\n")):
         d = os.path.join(scratch, name)
         shutil.rmtree(d, ignore_errors=True)
@@ -75,8 +75,11 @@ def self_test(env, backend, gpu_sieve=1, scratch="/tmp/siever_selftest"):
             f.write(item)
         with open(os.path.join(d, "prime.ini"), "w") as f:
             f.write(ini)
-        subprocess.run([BINARY], cwd=d, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, env=env, check=True)
+        rc = subprocess.run([BINARY], cwd=d, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, env=env).returncode
+        if rc != 0:
+            print(f"Self-test ({name}): siever exited with code {rc}; see", os.path.join(d, "siever.log"))
+            return False
         with open(os.path.join(d, "siever.log")) as f:
             log = f.read()
         if name == "gpu" and "GPU enabled" not in log:
@@ -130,7 +133,8 @@ def main():
     ap.add_argument("--cpu-threads", type=int, default=None,
                     help="CPU threads per worker (default: spread the free cores over the workers)")
     ap.add_argument("--gpu-sieve", type=int, default=1, choices=[0, 1],
-                    help="1 = generate the primes on the GPU too (13.1; the CPU stays nearly idle)")
+                    help="1 = generate the primes on the GPU too and stop rather than fall back to CPU "
+                         "sieving (GPU_strict); the CPU stays nearly idle")
     ap.add_argument("--gpu-threads", type=int, default=2,
                     help="feeder threads per GPU worker; one sieves on the CPU while another's chunk is on the GPU")
     ap.add_argument("--backend", default="auto", choices=["auto", "cuda", "opencl"])
@@ -168,7 +172,7 @@ def main():
                 f.write(line + "\n")
             with open(os.path.join(d, "prime.ini"), "w") as f:
                 f.write(f"CPU_count={cpu}\nMemoryAllowed=64\nUseGPU=1\nGPU_device={i}\nGPU_backend={args.backend}\n"
-                        f"GPU_threads={args.gpu_threads}\nGPU_sieve={args.gpu_sieve}\n")
+                        f"GPU_threads={args.gpu_threads}\nGPU_sieve={args.gpu_sieve}\nGPU_strict={args.gpu_sieve}\n")
             print(f"gpu{i}: {line}  (CPU_count={cpu})")
         slots = sorted(d for d in os.listdir(args.state) if d.startswith("gpu"))
     else:
@@ -183,7 +187,8 @@ def main():
         for slot in slots:
             ini = os.path.join(args.state, slot, "prime.ini")
             if os.path.exists(ini) and not os.path.exists(os.path.join(args.state, slot, "results.json")):
-                update_ini(ini, {"CPU_count": cpu, "GPU_threads": args.gpu_threads, "GPU_sieve": args.gpu_sieve})
+                update_ini(ini, {"CPU_count": cpu, "GPU_threads": args.gpu_threads, "GPU_sieve": args.gpu_sieve,
+                                 "GPU_strict": args.gpu_sieve})
                 print(f"{slot}: CPU_count={cpu}, GPU_threads={args.gpu_threads}, GPU_sieve={args.gpu_sieve}")
 
     env = dict(os.environ)
