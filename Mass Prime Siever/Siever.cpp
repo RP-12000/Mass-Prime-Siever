@@ -117,8 +117,10 @@ int main() {
         siever::GpuSiever* gpu_ptr = nullptr;
         if (config.use_gpu != 0 && gpu.init(config.gpu_device, config.gpu_backend)) {
             gpu_ptr = &gpu;
+            gpu.set_classes(config.gpu_classes != 0);
             log_info("GPU_threads=" + std::to_string(config.gpu_threads) +
-                     (config.gpu_sieve != 0 ? ", GPU_sieve=1 (primes generated on the GPU)" : ", GPU_sieve=0"));
+                     (config.gpu_sieve != 0 ? ", GPU_sieve=1 (primes generated on the GPU)" : ", GPU_sieve=0") +
+                     ", GPU_classes=" + std::to_string(config.gpu_classes));
         }
         if (gpu_ptr == nullptr && config.cpu_count <= 0) {
             // CPU_count=0 means "GPU only"; without a GPU nothing would sieve and every n would

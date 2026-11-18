@@ -21,6 +21,7 @@ struct PrimeConfig {
     std::string gpu_backend = "auto";  // GPU_backend=auto|cuda|opencl
     int gpu_threads = 2;  // 13.0: GPU_threads=N feeder threads share the GPU (sieve overlaps GPU work)
     int gpu_sieve = 0;    // 13.1: GPU_sieve=1 generates the primes on the GPU too (for weak CPUs, e.g. Kaggle)
+    int gpu_classes = 1;  // 13.1: GPU_classes=1 splits n into residue classes mod 24 on the GPU sieve path
 };
 
 inline std::string trim(std::string value) {
@@ -80,6 +81,8 @@ inline PrimeConfig load_prime_config(const std::string& path) {
                 config.gpu_threads = std::max(1, std::stoi(value));
             } else if (key == "GPU_sieve") {
                 config.gpu_sieve = std::stoi(value);
+            } else if (key == "GPU_classes") {
+                config.gpu_classes = std::stoi(value);
             } else if (key == "MemoryAllowed") {
                 config.memory_allowed_mb = std::stoi(value);
                 has_memory = true;

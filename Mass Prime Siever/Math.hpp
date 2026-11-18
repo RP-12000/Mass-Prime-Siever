@@ -315,6 +315,28 @@ constexpr unsigned kGpuSieveWg = 256;                                    // SV_W
 constexpr uint64_t kGpuSievePassOdds = 32ULL * kGpuSieveSegOdds;         // 32 segments per pass
 constexpr uint32_t kGpuSieveSurvCap = static_cast<uint32_t>(kGpuSievePassOdds / 4);
 constexpr uint32_t kGpuSieveEntCap = static_cast<uint32_t>(kGpuSievePassOdds / 8);
+constexpr uint32_t kGpuSieveEntCapQ = static_cast<uint32_t>(kGpuSievePassOdds / 16);   // ENTQ = 36 u64 each
+// bytes of the entry buffer: room for either layout (ENT = 11 or ENTQ = 36 u64 per entry)
+constexpr size_t kGpuSieveEntBytes = (size_t(kGpuSieveEntCap) * 11 > size_t(kGpuSieveEntCapQ) * 36 ? size_t(kGpuSieveEntCap) * 11 : size_t(kGpuSieveEntCapQ) * 36) * sizeof(uint64_t);
+
+// 13.1: residue classes for the GPU sieve path.  Q = lcm(cm, 24) is the largest class modulus; each
+// prime splits the in-class n by lcm(cm, gcd(Q, p - 1)) on the GPU (MAXC = 24 in Gpu.hpp).
+inline bool gpu_classes(const WorkItem& item, uint64_t& Q, std::vector<uint32_t>& classes) {
+    const uint64_t cm = item.cls_mod == 0 ? 1 : item.cls_mod;
+    if (item.N0 < 0 || item.N1 <= item.N0) return false;
+    const uint64_t span = static_cast<uint64_t>(item.N1 - item.N0);
+    Q = cm / std::gcd(cm, uint64_t(24)) * 24;
+    // only for an even cm: then the class split rejects most primes (for odd cm nearly every prime
+    // keeps a class, the entries would not fit and the plain path is faster)
+    if ((cm & 1) != 0 || Q > 48 || span / Q < 4096) return false;
+    classes.clear();
+    for (uint64_t r = 0; r < Q; ++r) {
+        if (r % cm == item.cls_res % cm) classes.push_back(static_cast<uint32_t>(r));
+    }
+    return !classes.empty() && classes.size() <= 24;
+}
+// Largest baby-step count prep_svq picks (QMAX_M in Gpu.hpp).
+inline uint64_t gpu_classes_max_m(const WorkItem&, uint64_t) { return 1024; }
 
 // Odd primes 3 .. 65521 used by psieve; the first gpu_sieve_nsmall() of them are below 1024.
 inline const std::vector<uint32_t>& gpu_sieve_primes() {

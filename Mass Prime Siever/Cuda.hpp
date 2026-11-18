@@ -243,6 +243,10 @@ public:
             log_info("CUDA: GPU sieve kernels unavailable, sieving on the CPU");
             k_psieve_ = k_prepsv_ = k_collect_ = nullptr;
         }
+        if (api_.cuModuleGetFunction(&k_prepsvq_, module_, "prep_svq") != 0 ||
+            api_.cuModuleGetFunction(&k_wq_, module_, "bsgs_wq") != 0) {
+            k_prepsvq_ = k_wq_ = nullptr;
+        }
         int nv_major = 0, nv_minor = 0;
         api_.nvrtcVersion(&nv_major, &nv_minor);
         log_info(std::string("GPU enabled (CUDA): ") + name + ", compute " + std::to_string(major) + "." +
@@ -331,21 +335,27 @@ public:
         const uint64_t N0 = item.N0 < 0 ? 0 : to_uint64(item.N0);
         const uint64_t N1 = to_uint64(item.N1);
         const uint64_t cm = item.cls_mod == 0 ? 1 : item.cls_mod;
-        const uint64_t kmax = (N1 - N0) / cm + 2;
-        const uint64_t m = static_cast<uint64_t>(std::sqrt(static_cast<double>(kmax))) + 2;
+        // 13.1: residue classes mod Q (all in-class residues are searched, so results are unchanged)
+        uint64_t Qc = 0;
+        std::vector<uint32_t> classes;
+        const bool qmode = use_classes_ && k_prepsvq_ != nullptr && gpu_classes(item, Qc, classes);
+        const uint64_t kmax = qmode ? 0 : (N1 - N0) / cm + 2;
+        uint64_t m = static_cast<uint64_t>(std::sqrt(static_cast<double>(kmax))) + 2;
+        if (qmode) m = gpu_classes_max_m(item, Qc);
         unsigned tbits = 4;
         while ((1ULL << tbits) < m + m / 4) ++tbits;
         const size_t lbytes = (size_t(1) << tbits) * sizeof(uint32_t);
         if (lbytes + 1024 > shared_mem_ || tbits > 14) return false;
-        unsigned int cap = kGpuSieveSurvCap, ent_cap = kGpuSieveEntCap;
+        unsigned int cap = kGpuSieveSurvCap, ent_cap = qmode ? kGpuSieveEntCapQ : kGpuSieveEntCap;
         const std::vector<uint32_t>& sp = gpu_sieve_primes();
         if (!sv_ready_) {
             if (api_.cuMemAlloc(&d_sp_, sp.size() * sizeof(uint32_t)) != 0 ||
                 api_.cuMemAlloc(&d_surv_, size_t(cap) * sizeof(uint64_t)) != 0 ||
                 api_.cuMemAlloc(&d_sflags_, cap) != 0 ||
-                api_.cuMemAlloc(&d_sent_, size_t(ent_cap) * 11 * sizeof(uint64_t)) != 0 ||
+                api_.cuMemAlloc(&d_sent_, kGpuSieveEntBytes) != 0 ||
                 api_.cuMemAlloc(&d_out_, size_t(cap) * sizeof(uint64_t)) != 0 ||
                 api_.cuMemAlloc(&d_cnt3_, 3 * sizeof(uint32_t)) != 0 ||
+
                 api_.cuMemcpyHtoD(d_sp_, sp.data(), sp.size() * sizeof(uint32_t)) != 0) {
                 return sv_fail("buffer setup");
             }
@@ -357,6 +367,7 @@ public:
         unsigned long long n0 = N0, n1 = N1, cmod = cm, cres = item.cls_res;
         unsigned int tb = tbits;
         cudadyn::CUdeviceptr d_scnt = d_cnt3_, d_ecnt = d_cnt3_ + 4, d_ocnt = d_cnt3_ + 8;
+        unsigned long long qv = Qc;
         std::vector<uint64_t> buf;
         for (uint64_t pb = 0; pb < count; pb += kGpuSievePassOdds) {
             unsigned long long pc = std::min<uint64_t>(kGpuSievePassOdds, count - pb);
@@ -372,8 +383,10 @@ public:
             if (n > cap) return false;  // more survivors than the buffer holds (only for tiny p): CPU path
             if (n == 0) continue;
             void* prep_args[] = {&d_surv_, &d_sflags_, &d_sent_, &d_ecnt, &ent_cap, &b, &c, &n0, &n1, &cmod, &cres, &n};
+            void* prepq_args[] = {&d_surv_, &d_sflags_, &d_sent_, &d_ecnt, &ent_cap, &b, &c, &n0, &n1, &cmod, &cres, &qv, &n};
             const unsigned blocks = (n + 63) / 64;
-            if (api_.cuLaunchKernel(k_prepsv_, blocks, 1, 1, 64, 1, 1, 0, nullptr, prep_args, nullptr) != 0) {
+            if (api_.cuLaunchKernel(qmode ? k_prepsvq_ : k_prepsv_, blocks, 1, 1, 64, 1, 1, 0, nullptr,
+                                    qmode ? prepq_args : prep_args, nullptr) != 0) {
                 return sv_fail("prep_sv launch");
             }
             unsigned int n_ent = 0;
@@ -381,9 +394,9 @@ public:
             n_ent = std::min(n_ent, ent_cap);  // entries past ent_cap were flagged 2 (CPU) by prep_sv
             if (n_ent > 0) {
                 void* wg_args[] = {&d_sent_, &d_sflags_, &tb};
-                if (api_.cuLaunchKernel(k_wg_, n_ent, 1, 1, 64, 1, 1, static_cast<unsigned>(lbytes), nullptr, wg_args,
-                                        nullptr) != 0) {
-                    return sv_fail("bsgs_wg launch");
+                if (api_.cuLaunchKernel(qmode ? k_wq_ : k_wg_, n_ent, 1, 1, 64, 1, 1, static_cast<unsigned>(lbytes),
+                                        nullptr, wg_args, nullptr) != 0) {
+                    return sv_fail("bsgs launch");
                 }
             }
             void* col_args[] = {&d_surv_, &d_sflags_, &n, &d_out_, &d_ocnt};
@@ -436,6 +449,9 @@ private:
     cudadyn::CUfunction k_psieve_ = nullptr, k_prepsv_ = nullptr, k_collect_ = nullptr;
     cudadyn::CUdeviceptr d_sp_ = 0, d_surv_ = 0, d_sflags_ = 0, d_sent_ = 0, d_out_ = 0, d_cnt3_ = 0;
     bool sv_ready_ = false, sv_broken_ = false;
+    cudadyn::CUfunction k_prepsvq_ = nullptr, k_wq_ = nullptr;
+public:
+    bool use_classes_ = true;
 };
 
 }  // namespace siever

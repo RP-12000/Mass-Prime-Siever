@@ -14,6 +14,12 @@ Current version: **13.1** (successor of 13.0; same file formats, see `relations.
   exactly (deterministic Miller-Rabin, then the usual BSGS). The CPU work of a GPU worker drops about
   5x, so a GPU is no longer held back by a slow CPU (Kaggle: 4 vCPUs for 2 T4s). The GPU spends about
   3% more time per chunk.
+- **Residue classes per prime** (`GPU_classes=1`, default; GPU sieve path, even `mod`): with
+  g = gcd(lcm(mod, 24), p - 1) the in-class n are split by lcm(mod, g). b^lcm(mod, g) is a g-th power
+  residue, so a class can only hold a solution if t * b^-n is one too; this one test rejects about
+  70% of the primes (the quadratic-residue test alone: 50%), and the remaining primes run one BSGS over
+  their surviving classes with a shared baby-step table. Every class is covered, so the relations do
+  not change. About 1.5x less GPU time on 2^n-25 at p = 95T.
 - CUDA waits for the GPU with a blocking sync instead of spinning, so a GPU worker leaves the CPU idle.
 - `is_prime64` uses the 12 bases 2..37 and is exact for all 64-bit numbers (bases 2..11 are exact
   only below 2.15e12).
@@ -84,6 +90,7 @@ UseGPU=1          # 1 = add an OpenCL GPU worker
 GPU_device=0      # index of the OpenCL GPU
 GPU_threads=2     # 13.0: feeder threads sharing the GPU
 GPU_sieve=0       # 13.1: 1 = generate the primes on the GPU too (for weak CPUs, e.g. Kaggle)
+GPU_classes=1     # 13.1: residue classes per prime on the GPU sieve path (0 = off)
 ```
 
 ## Output
@@ -123,6 +130,9 @@ against about 9 h with 12.0 for the same 5T at 90T-95T.
 |---|---|---|
 | all 16 logical CPUs available | 10.1 s, 4.7 s CPU time | 10.3 s, 0.9 s CPU time |
 | process limited to 1 logical CPU | 15.0 s | 10.4 s |
+
+With `GPU_classes=1` (later measurement, laptop warmer: 13.0 took 13.3 s here) the same range takes
+8.5 s against 12.7 s for 13.1 without classes.
 
 The second row is the situation of a fast GPU next to a slow CPU, as on Kaggle, where 13.0 spent
 about 0.18 s per 64 MB chunk mostly waiting for the CPU sieve.

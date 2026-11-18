@@ -219,6 +219,11 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
                     if (p >= lo && p < hi && is_prime64(p)) primes.push_back(p);
                 }
                 sieved_on_gpu = true;
+            } else {
+                static std::atomic<int> declined{0};
+                if (declined.fetch_add(1) < 3) {
+                    log_info("GPU sieve declined chunk starting at " + std::to_string(lo) + ", sieving it on the CPU");
+                }
             }
         }
         if (!sieved_on_gpu) {
@@ -236,6 +241,11 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
                 flagged.reserve(todo.size());
                 for (const std::size_t i : todo) flagged.push_back(primes[i]);
                 primes.swap(flagged);
+            } else {
+                static std::atomic<int> unfiltered{0};
+                if (unfiltered.fetch_add(1) < 3) {
+                    log_info("GPU filter unavailable for a chunk: every prime is checked on the CPU (slow)");
+                }
             }
         }
 

@@ -330,6 +330,7 @@ KERNEL void bsgs_wg(GLOBAL const u64* ent, GLOBAL uchar* flags, const u32 tbits
                       DYN_LOCAL_PARAM(tab)) {
     DYN_LOCAL_DECL(tab)
     LOCAL volatile int hit;
+    LOCAL u64 pt[32];   // B^0..7, B^(8*0..7), Bm^0..7, Bm^(8*0..7)
     const u32 lid = LOCAL_ID();
     GLOBAL const u64* e = ent + (u64)GROUP_ID() * ENT;
     const u64 idx = e[0], p = e[1], ninv = e[2], one = e[3], B = e[4], tm = e[5], G0 = e[6], jcount = e[7];
@@ -340,9 +341,21 @@ KERNEL void bsgs_wg(GLOBAL const u64* ent, GLOBAL uchar* flags, const u32 tbits
     const u32 tsize = 1u << tbits, mask = tsize - 1u;
     for (u32 i = lid; i < tsize; i += WG) tab[i] = 0xFFFFFFFFu;
     if (lid == 0) hit = 0;
+    if (lid < 32u) {
+        // lane powers from two 8-entry tables: x^l = lo[l & 7] * hi[l >> 3]
+        u64 base = (lid < 16u) ? B : Bm;
+        if (lid & 8u) {
+            base = mmul(base, base, p, ninv);
+            base = mmul(base, base, p, ninv);
+            base = mmul(base, base, p, ninv);
+        }
+        pt[lid] = mpow(base, (u64)(lid & 7u), one, p, ninv);
+    }
     BARRIER();
+    const u64 Bl = mmul(pt[lid & 7u], pt[8u + (lid >> 3)], p, ninv);          // B^lid
+    const u64 Bml = mmul(pt[16u + (lid & 7u)], pt[24u + (lid >> 3)], p, ninv);  // (B^m)^lid
     // baby steps: t * B^i, i = lid, lid + WG, ...
-    u64 v = mmul(tm, mpow(B, lid, one, p, ninv), p, ninv);
+    u64 v = mmul(tm, Bl, p, ninv);
     for (u64 i = lid; i < m; i += WG) {
         u32 f = fp32(v);
         u32 h = (u32)((v * 0x9E3779B97F4A7C15UL) >> (64 - tbits));
@@ -356,14 +369,15 @@ KERNEL void bsgs_wg(GLOBAL const u64* ent, GLOBAL uchar* flags, const u32 tbits
     BARRIER();
     // giant steps: G0 * (B^m)^g, g = lid, lid + WG, ..., g <= G
     const u64 G = (jcount + m - 1) / m;
-    v = mmul(G0, mpow(Bm, lid, one, p, ninv), p, ninv);
+    v = mmul(G0, Bml, p, ninv);
+    int found = 0;
     for (u64 gs = lid; gs <= G; gs += WG) {
-        if (hit) break;
         u32 f = fp32(v);
         u32 h = (u32)((v * 0x9E3779B97F4A7C15UL) >> (64 - tbits));
-        while (tab[h] != 0xFFFFFFFFu) { if (tab[h] == f) { hit = 1; break; } h = (h + 1u) & mask; }
+        while (tab[h] != 0xFFFFFFFFu) { if (tab[h] == f) { found = 1; break; } h = (h + 1u) & mask; }
         v = mmul(v, BmL, p, ninv);
     }
+    if (found) hit = 1;
     BARRIER();
     if (lid == 0 && hit) flags[idx] = 1;
 }
@@ -448,6 +462,193 @@ KERNEL void collect(GLOBAL const u64* list, GLOBAL const uchar* flags, const u32
     if (flags[gid] != 0) out[ATOMIC_INC(out_count)] = list[gid];
 }
 
+// ---------------- 13.1: per-prime residue classes (GPU sieve path) ----------------
+// For a prime p let g = gcd(Qmax, p - 1) (Qmax = lcm(cm, 24)) and Qp = lcm(cm, g).  The in-class n
+// split into the classes n == r_j (mod Qp).  B = b^Qp is a g-th power residue, so class j can only
+// hold a solution if T_j = t * b^-n_j is one too: t^e == (b^e)^n_j, e = (p - 1) / g.  Most primes
+// fail this for every class and are dropped here; the others run one BSGS over their surviving
+// classes with a shared baby-step table:
+//   b^n_j * (B^m)^g == t * B^i,  k = g*m - i,  n = n_j + Qp*k.
+// Every class of in-class n is covered, so the relations are exactly those of the other paths.
+#define MAXC 24
+#define ENTQ (12 + MAXC)
+#define QMAX_M 1024u
+// entry layout (ENTQ x u64): idx, p, ninv, one, B, t, m, Gc, B^m, B^WG, (B^m)^WG, s, G_0 .. G_{s-1}
+
+DEVICE_BIG_FN void prep_q_core(const u64 p, const u32 gid, const int need_prime, GLOBAL uchar* flags,
+                               GLOBAL u64* ent, GLOBAL volatile uint* ent_count, const uint ent_cap,
+                               const u64 b, const i64 c, const u64 N0, const u64 N1, const u64 cm,
+                               const u64 cres, const u64 Qmax) {
+    flags[gid] = 0;
+    if (p < 1000UL || (p & 1UL) == 0) { flags[gid] = 2; return; }
+    const u64 b_mod = b % p;
+    u64 t;
+    if (c >= 0) { u64 cm_ = ((u64)c) % p; t = cm_ == 0 ? 0 : p - cm_; }
+    else { t = ((u64)(-c)) % p; }
+    if (b_mod == 0) { flags[gid] = 2; return; }
+    if (t == 0) return;
+    const u64 span = N1 - N0;
+    const u64 g = gcd64(Qmax, p - 1UL);
+    const uint qp = (uint)(g / gcd64(g, cm) * cm);     // lcm(cm, g), divides Qmax (<= 48)
+    const uint ncls = qp / (uint)cm;                    // in-class residues mod qp
+    // class j: residue r_j = cres + j*cm (mod qp); first n >= N0 is N0 + dj
+    const uint n0q = (uint)(N0 % (u64)qp);
+    const uint c0 = (uint)(cres % cm);
+    uint dj[MAXC];
+    for (uint j = 0; j < ncls; ++j) dj[j] = (c0 + j * (uint)cm + qp - n0q) % qp;
+    // quadratic-residue test per class (B = b^qp is a square because qp is even)
+    const int jb = jacobi64(b_mod, p);
+    const int jt = jacobi64(t, p);
+    const uint n0odd = (uint)(N0 & 1UL);
+    uint mask = 0u;
+    for (uint j = 0; j < ncls; ++j) {
+        if ((u64)dj[j] >= span) continue;
+        const int l = jt * (((n0odd ^ (dj[j] & 1u)) != 0u) ? jb : 1);
+        if (l == 1) mask |= 1u << j;
+    }
+    if (mask == 0u) return;
+    u64 inv = p;
+    for (int i = 0; i < 5; ++i) inv *= 2UL - p * inv;
+    const u64 ninv = 0UL - inv;
+    const u64 one = (0UL - p) % p;
+    if (need_prime) {
+        const u64 e = p - 1UL;
+        int k = 63;
+        while (k > 0 && ((e >> k) & 1UL) == 0UL) --k;
+        u64 x = one;
+        for (; k >= 0; --k) {
+            x = mmul(x, x, p, ninv);
+            if ((e >> k) & 1UL) { x += x; if (x >= p) x -= p; }
+        }
+        if (x != one) return;
+    }
+    u64 r2 = one;
+    for (int i = 0; i < 64; ++i) { r2 = (r2 >= p - r2) ? r2 - (p - r2) : r2 + r2; }
+    const u64 b_m = mmul(b_mod, r2, p, ninv);
+    const u64 tm = mmul(t, r2, p, ninv);
+    if (g > 2UL) {
+        // class j needs t^e == (b^e)^(n_j mod g), e = (p - 1) / g
+        const u64 e = (p - 1UL) / g;
+        const u64 u = mpow(tm, e, one, p, ninv);
+        const u64 w = mpow(b_m, e, one, p, ninv);
+        const uint g32 = (uint)g;
+        const uint n0g = (uint)(N0 % g);
+        uint keep = 0u;
+        u64 wk = one;
+        for (uint k = 0; k < g32; ++k) {
+            if (wk == u) {
+                for (uint j = 0; j < ncls; ++j) if ((n0g + dj[j]) % g32 == k) keep |= 1u << j;
+            }
+            wk = mmul(wk, w, p, ninv);
+        }
+        mask &= keep;
+        if (mask == 0u) return;
+    }
+    uint s = 0u, dmin = qp;
+    for (uint j = 0; j < ncls; ++j) {
+        if (((mask >> j) & 1u) == 0u) continue;
+        ++s;
+        if (dj[j] < dmin) dmin = dj[j];
+    }
+    // giant steps per class Gc = WG * cr with m <= QMAX_M baby steps; cr near sqrt(K / (WG^2 s))
+    const u64 K = (span + qp - 1) / qp;
+    u64 crmin = (K + (u64)WG * (QMAX_M - 1) - 1) / ((u64)WG * (QMAX_M - 1));
+    if (crmin < 2) crmin = 2;
+    u64 crc = (u64)sqrt((double)K / ((double)WG * (double)WG * (double)s));
+    u64 best = 0xFFFFFFFFFFFFFFFFUL, m = QMAX_M, Gc = (u64)WG * crmin;
+    for (u64 cr = (crc > 1 ? crc - 1 : 1); cr <= crc + 2; ++cr) {
+        const u64 cx = cr < crmin ? crmin : cr;
+        const u64 gc = (u64)WG * cx;
+        const u64 mm = (K + gc - 3) / (gc - 1) + 1;     // (gc - 1) * mm >= K - 1
+        if (mm > QMAX_M) continue;
+        const u64 rounds = (mm + WG - 1) / WG + (u64)s * cx;
+        if (rounds < best) { best = rounds; m = mm; Gc = gc; }
+    }
+    if (best == 0xFFFFFFFFFFFFFFFFUL) {          // no candidate kept m <= QMAX_M: grow cr until it does
+        for (u64 cx = crmin; ; ++cx) {
+            const u64 gc = (u64)WG * cx;
+            const u64 mm = (K + gc - 3) / (gc - 1) + 1;
+            if (mm <= QMAX_M) { m = mm; Gc = gc; break; }
+        }
+    }
+    const uint slot = ATOMIC_INC(ent_count);
+    if (slot >= ent_cap) { flags[gid] = 2; return; }
+    GLOBAL u64* e = ent + (u64)slot * ENTQ;
+    const u64 B = mpow(b_m, (u64)qp, one, p, ninv);
+    const u64 Bm = mpow(B, m, one, p, ninv);
+    e[0] = gid; e[1] = p; e[2] = ninv; e[3] = one; e[4] = B; e[5] = tm; e[6] = m; e[7] = Gc;
+    e[8] = Bm; e[9] = mpow(B, WG, one, p, ninv); e[10] = mpow(Bm, WG, one, p, ninv); e[11] = s;
+    // G_j = b^n_j = b^(N0 + dmin) * b^(dj - dmin)
+    const u64 base = mpow(b_m, N0 + dmin, one, p, ninv);
+    uint out = 0u;
+    for (uint j = 0; j < ncls; ++j) {
+        if (((mask >> j) & 1u) == 0u) continue;
+        e[12 + out] = mmul(base, mpow(b_m, (u64)(dj[j] - dmin), one, p, ninv), p, ninv);
+        ++out;
+    }
+}
+
+KERNEL void prep_svq(GLOBAL const u64* surv, GLOBAL uchar* flags, GLOBAL u64* ent,
+                       GLOBAL volatile uint* ent_count, const uint ent_cap,
+                       const u64 b, const i64 c, const u64 N0, const u64 N1, const u64 cm,
+                       const u64 cres, const u64 Qmax, const u32 count) {
+    const u32 gid = GLOBAL_ID();
+    if (gid >= count) return;
+    prep_q_core(surv[gid], gid, 1, flags, ent, ent_count, ent_cap, b, c, N0, N1, cm, cres, Qmax);
+}
+
+KERNEL void bsgs_wq(GLOBAL const u64* ent, GLOBAL uchar* flags, const u32 tbits
+                      DYN_LOCAL_PARAM(tab)) {
+    DYN_LOCAL_DECL(tab)
+    LOCAL volatile int hit;
+    LOCAL u64 pt[32];   // B^0..7, B^(8*0..7), Bm^0..7, Bm^(8*0..7)
+    const u32 lid = LOCAL_ID();
+    GLOBAL const u64* e = ent + (u64)GROUP_ID() * ENTQ;
+    const u64 idx = e[0], p = e[1], ninv = e[2], one = e[3], B = e[4], tm = e[5], m = e[6], Gc = e[7];
+    const u64 Bm = e[8], BL = e[9], BmL = e[10];
+    const uint s = (uint)e[11];
+    const u32 tsize = 1u << tbits, mask = tsize - 1u;
+    for (u32 i = lid; i < tsize; i += WG) tab[i] = 0xFFFFFFFFu;
+    if (lid == 0) hit = 0;
+    if (lid < 32u) {
+        u64 base = (lid < 16u) ? B : Bm;
+        if (lid & 8u) {
+            base = mmul(base, base, p, ninv);
+            base = mmul(base, base, p, ninv);
+            base = mmul(base, base, p, ninv);
+        }
+        pt[lid] = mpow(base, (u64)(lid & 7u), one, p, ninv);
+    }
+    BARRIER();
+    const u64 Bl = mmul(pt[lid & 7u], pt[8u + (lid >> 3)], p, ninv);
+    const u64 Bml = mmul(pt[16u + (lid & 7u)], pt[24u + (lid >> 3)], p, ninv);
+    u64 v = mmul(tm, Bl, p, ninv);
+    for (u64 i = lid; i < m; i += WG) {
+        u32 f = fp32(v);
+        u32 h = (u32)((v * 0x9E3779B97F4A7C15UL) >> (64 - tbits));
+        for (;;) {
+            u32 prev = ATOMIC_CAS(&tab[h], 0xFFFFFFFFu, f);
+            if (prev == 0xFFFFFFFFu || prev == f) break;
+            h = (h + 1u) & mask;
+        }
+        v = mmul(v, BL, p, ninv);
+    }
+    BARRIER();
+    int found = 0;
+    for (uint j = 0; j < s; ++j) {
+        v = mmul(e[12 + j], Bml, p, ninv);
+        for (u64 gs = lid; gs < Gc; gs += WG) {
+            u32 f = fp32(v);
+            u32 h = (u32)((v * 0x9E3779B97F4A7C15UL) >> (64 - tbits));
+            while (tab[h] != 0xFFFFFFFFu) { if (tab[h] == f) { found = 1; break; } h = (h + 1u) & mask; }
+            v = mmul(v, BmL, p, ninv);
+        }
+    }
+    if (found) hit = 1;
+    BARRIER();
+    if (lid == 0 && hit) flags[idx] = 1;
+}
+
 )CLC";
 
 class OpenClSiever {
@@ -504,9 +705,11 @@ public:
         k_psieve_ = clCreateKernel(prog_, "psieve", &err);
         if (err == CL_SUCCESS) k_prepsv_ = clCreateKernel(prog_, "prep_sv", &err);
         if (err == CL_SUCCESS) k_collect_ = clCreateKernel(prog_, "collect", &err);
+        if (err == CL_SUCCESS) k_prepsvq_ = clCreateKernel(prog_, "prep_svq", &err);
+        if (err == CL_SUCCESS) k_wq_ = clCreateKernel(prog_, "bsgs_wq", &err);
         if (err != CL_SUCCESS) {
             log_info("OpenCL: GPU sieve kernels unavailable (" + std::to_string(err) + "), sieving on the CPU");
-            k_psieve_ = k_prepsv_ = k_collect_ = nullptr;
+            k_psieve_ = k_prepsv_ = k_collect_ = k_prepsvq_ = k_wq_ = nullptr;
         }
         cl_ulong lmem = 0;
         clGetDeviceInfo(dev_, CL_DEVICE_LOCAL_MEM_SIZE, sizeof(lmem), &lmem, nullptr);
@@ -659,20 +862,25 @@ public:
         const uint64_t N0 = item.N0 < 0 ? 0 : to_uint64(item.N0);
         const uint64_t N1 = to_uint64(item.N1);
         const uint64_t cm = item.cls_mod == 0 ? 1 : item.cls_mod;
-        const uint64_t kmax = (N1 - N0) / cm + 2;
-        const uint64_t m = static_cast<uint64_t>(std::sqrt(static_cast<double>(kmax))) + 2;
+        // 13.1: residue classes mod Q (all in-class residues are searched, so results are unchanged)
+        uint64_t Qc = 0;
+        std::vector<uint32_t> classes;
+        const bool qmode = use_classes_ && k_prepsvq_ != nullptr && gpu_classes(item, Qc, classes);
+        const uint64_t kmax = qmode ? 0 : (N1 - N0) / cm + 2;
+        uint64_t m = static_cast<uint64_t>(std::sqrt(static_cast<double>(kmax))) + 2;
+        if (qmode) m = gpu_classes_max_m(item, Qc);
         unsigned tbits = 4;
         while ((1ULL << tbits) < m + m / 4) ++tbits;
         const size_t lbytes = (size_t(1) << tbits) * sizeof(uint32_t);
         if (lbytes + 1024 > local_mem_ || tbits > 14) return false;
         cl_int err = CL_SUCCESS;
-        const cl_uint cap = kGpuSieveSurvCap, ent_cap = kGpuSieveEntCap;
+        const cl_uint cap = kGpuSieveSurvCap, ent_cap = qmode ? kGpuSieveEntCapQ : kGpuSieveEntCap;
         const std::vector<uint32_t>& sp = gpu_sieve_primes();
         if (!sv_ready_) {
             d_sp_ = clCreateBuffer(ctx_, CL_MEM_READ_ONLY, sp.size() * sizeof(uint32_t), nullptr, &err);
             if (err == CL_SUCCESS) d_surv_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, size_t(cap) * sizeof(uint64_t), nullptr, &err);
             if (err == CL_SUCCESS) d_sflags_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, cap, nullptr, &err);
-            if (err == CL_SUCCESS) d_sent_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, size_t(ent_cap) * 11 * sizeof(uint64_t), nullptr, &err);
+            if (err == CL_SUCCESS) d_sent_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, kGpuSieveEntBytes, nullptr, &err);
             if (err == CL_SUCCESS) d_out_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, size_t(cap) * sizeof(uint64_t), nullptr, &err);
             if (err == CL_SUCCESS) d_scnt_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
             if (err == CL_SUCCESS) d_ecnt_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
@@ -690,6 +898,7 @@ public:
         const cl_ulong n0 = N0, n1 = N1, cmod = cm, cres = item.cls_res;
         const cl_uint tb = tbits;
         const cl_uint zero = 0;
+        const cl_ulong qv = Qc;
         std::vector<uint64_t> buf;
         for (uint64_t pb = 0; pb < count; pb += kGpuSievePassOdds) {
             const cl_ulong pc = std::min<uint64_t>(kGpuSievePassOdds, count - pb);
@@ -716,33 +925,36 @@ public:
             if (n > cap) return false;  // more survivors than the buffer holds (only for tiny p): CPU path
             if (n == 0) continue;
             a = 0;
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_mem), &d_surv_);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_mem), &d_sflags_);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_mem), &d_sent_);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_mem), &d_ecnt_);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_uint), &ent_cap);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_ulong), &b);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_long), &c);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_ulong), &n0);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_ulong), &n1);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_ulong), &cmod);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_ulong), &cres);
-            clSetKernelArg(k_prepsv_, a++, sizeof(cl_uint), &n);
+            cl_kernel kp = qmode ? k_prepsvq_ : k_prepsv_;
+            clSetKernelArg(kp, a++, sizeof(cl_mem), &d_surv_);
+            clSetKernelArg(kp, a++, sizeof(cl_mem), &d_sflags_);
+            clSetKernelArg(kp, a++, sizeof(cl_mem), &d_sent_);
+            clSetKernelArg(kp, a++, sizeof(cl_mem), &d_ecnt_);
+            clSetKernelArg(kp, a++, sizeof(cl_uint), &ent_cap);
+            clSetKernelArg(kp, a++, sizeof(cl_ulong), &b);
+            clSetKernelArg(kp, a++, sizeof(cl_long), &c);
+            clSetKernelArg(kp, a++, sizeof(cl_ulong), &n0);
+            clSetKernelArg(kp, a++, sizeof(cl_ulong), &n1);
+            clSetKernelArg(kp, a++, sizeof(cl_ulong), &cmod);
+            clSetKernelArg(kp, a++, sizeof(cl_ulong), &cres);
+            if (qmode) clSetKernelArg(kp, a++, sizeof(cl_ulong), &qv);
+            clSetKernelArg(kp, a++, sizeof(cl_uint), &n);
             size_t local = 64, global = ((size_t(n) + 63) / 64) * 64;
-            err = clEnqueueNDRangeKernel(queue_, k_prepsv_, 1, nullptr, &global, &local, 0, nullptr, nullptr);
+            err = clEnqueueNDRangeKernel(queue_, kp, 1, nullptr, &global, &local, 0, nullptr, nullptr);
             if (err != CL_SUCCESS) return sv_fail("prep_sv launch", err);
             cl_uint n_ent = 0;
             err = clEnqueueReadBuffer(queue_, d_ecnt_, CL_TRUE, 0, sizeof(cl_uint), &n_ent, 0, nullptr, nullptr);
             if (err != CL_SUCCESS) return sv_fail("entry count", err);
             n_ent = std::min(n_ent, ent_cap);  // entries past ent_cap were flagged 2 (CPU) by prep_sv
             if (n_ent > 0) {
-                clSetKernelArg(k_wg_, 0, sizeof(cl_mem), &d_sent_);
-                clSetKernelArg(k_wg_, 1, sizeof(cl_mem), &d_sflags_);
-                clSetKernelArg(k_wg_, 2, sizeof(cl_uint), &tb);
-                clSetKernelArg(k_wg_, 3, lbytes, nullptr);
+                cl_kernel kw = qmode ? k_wq_ : k_wg_;
+                clSetKernelArg(kw, 0, sizeof(cl_mem), &d_sent_);
+                clSetKernelArg(kw, 1, sizeof(cl_mem), &d_sflags_);
+                clSetKernelArg(kw, 2, sizeof(cl_uint), &tb);
+                clSetKernelArg(kw, 3, lbytes, nullptr);
                 size_t l2 = 64, g2 = size_t(n_ent) * 64;
-                err = clEnqueueNDRangeKernel(queue_, k_wg_, 1, nullptr, &g2, &l2, 0, nullptr, nullptr);
-                if (err != CL_SUCCESS) return sv_fail("bsgs_wg launch", err);
+                err = clEnqueueNDRangeKernel(queue_, kw, 1, nullptr, &g2, &l2, 0, nullptr, nullptr);
+                if (err != CL_SUCCESS) return sv_fail("bsgs launch", err);
             }
             a = 0;
             clSetKernelArg(k_collect_, a++, sizeof(cl_mem), &d_surv_);
@@ -818,6 +1030,9 @@ private:
     cl_mem d_sp_ = nullptr, d_surv_ = nullptr, d_sflags_ = nullptr, d_sent_ = nullptr, d_out_ = nullptr;
     cl_mem d_scnt_ = nullptr, d_ecnt_ = nullptr, d_ocnt_ = nullptr;
     bool sv_ready_ = false, sv_broken_ = false;
+    cl_kernel k_prepsvq_ = nullptr, k_wq_ = nullptr;
+public:
+    bool use_classes_ = true;
 };
 
 // Picks the GPU backend. GPU_backend in prime.ini: "auto" (default: CUDA if an NVIDIA driver and
@@ -845,6 +1060,7 @@ public:
         return use_cuda_ ? cuda_.filter(primes, item, todo) : opencl_.filter(primes, item, todo);
     }
     // 13.1: prime generation + filter on the GPU (see OpenClSiever::sieve_filter).
+    void set_classes(bool on) { cuda_.use_classes_ = on; opencl_.use_classes_ = on; }
     bool sieve_filter(uint64_t lo, uint64_t hi, const WorkItem& item, std::vector<uint64_t>& flagged) {
         std::lock_guard<std::mutex> lock(mutex_);
         return use_cuda_ ? cuda_.sieve_filter(lo, hi, item, flagged) : opencl_.sieve_filter(lo, hi, item, flagged);
