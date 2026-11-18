@@ -146,7 +146,8 @@ int main() {
             log_info("Sieving small primes up to " + std::to_string(sieve_limit));
             const std::vector<uint32_t> small_primes = sieve_small_primes(sieve_limit);
 
-            run_worker_pool(item, config.cpu_count, config.memory_allowed_mb, small_primes, gpu_ptr);
+            run_worker_pool(item, config.cpu_count, config.memory_allowed_mb, small_primes, gpu_ptr,
+                            config.gpu_threads);
 
             if (shutdown_requested.load()) {
                 log_info("Shutdown: checkpoint preserved in core_*.p files");
@@ -154,7 +155,7 @@ int main() {
             }
 
             log_info("Merging core files");
-            merge_core_files(config.cpu_count + 1);
+            merge_core_files(config.cpu_count + config.gpu_threads);
 
             const std::vector<Relation> relations = load_relations("relations.p");
             log_info("Loaded " + std::to_string(relations.size()) + " relation(s)");
@@ -168,7 +169,7 @@ int main() {
             log_final_status(item, candidates, item_elapsed);
             log_info("Finished work item " + std::to_string(work_index + 1));
 
-            for (int id = 0; id <= config.cpu_count; ++id) {
+            for (int id = 0; id < config.cpu_count + config.gpu_threads; ++id) {
                 remove_file_if_exists("core_" + std::to_string(id) + ".p");
             }
         }

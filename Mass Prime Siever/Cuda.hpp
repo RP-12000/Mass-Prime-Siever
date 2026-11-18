@@ -271,7 +271,7 @@ public:
         const size_t batch = 262144;
         if (cap_ < batch) {
             release();
-            if (api_.cuMemAlloc(&d_ent_, batch * 7 * sizeof(uint64_t)) != 0 ||
+            if (api_.cuMemAlloc(&d_ent_, batch * 11 * sizeof(uint64_t)) != 0 ||
                 api_.cuMemAlloc(&d_cnt_, sizeof(uint32_t)) != 0 ||
                 api_.cuMemAlloc(&d_primes_, batch * sizeof(uint64_t)) != 0 ||
                 api_.cuMemAlloc(&d_flags_, batch) != 0) {

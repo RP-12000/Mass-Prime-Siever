@@ -190,8 +190,33 @@ KERNEL void bsgs(GLOBAL const u64* primes, GLOBAL uchar* flags, GLOBAL u32* tabl
     }
     flags[gid] = result;
 }
-// ---------------- 12.0 v2: prep (filter + setup) then one workgroup per prime ----------------
-// entry layout (7 x u64): idx, p, ninv, one, B, target, jcount
+// ---------------- 12.1: prep (filter + setup) then one workgroup per prime ----------------
+// The equation is G0 * B^j == t (mod p), j in [0, jcount), with t = -c and G0 = b^n_start (times B for
+// the odd-k parity class).  Writing j = g*m - i (0 <= i < m, 0 <= g <= G) gives G0 * (B^m)^g == t * B^i,
+// so neither the setup nor the BSGS needs a modular inverse.  Everything shared by the lanes of a
+// workgroup (B^m, B^WG, (B^m)^WG) is computed here, one thread per prime, so bsgs_wg has no
+// single-lane sections.
+#ifndef WG
+#define WG 64
+#endif
+#define ENT 11
+// entry layout (ENT x u64): idx, p, ninv, one, B, t, G0, jcount, Bm, B^WG, Bm^WG
+
+// Jacobi symbol (a/n) for odd n, binary algorithm (no division).
+DEVICE_FN int jacobi64(u64 a, u64 n) {
+    int s = 1;
+    while (a != 0UL) {
+        const int r8 = ((n & 7UL) == 3UL || (n & 7UL) == 5UL);
+        while ((a & 1UL) == 0UL) { a >>= 1; if (r8) s = -s; }
+        if (a < n) {
+            const u64 x = a; a = n; n = x;
+            if ((a & 3UL) == 3UL && (n & 3UL) == 3UL) s = -s;
+        }
+        a -= n;
+    }
+    return n == 1UL ? s : 0;
+}
+
 KERNEL void prep(GLOBAL const u64* primes, GLOBAL uchar* flags, GLOBAL u64* ent,
                    GLOBAL volatile uint* ent_count,
                    const u64 b, const i64 c, const u64 N0, const u64 N1,
@@ -211,6 +236,25 @@ KERNEL void prep(GLOBAL const u64* primes, GLOBAL uchar* flags, GLOBAL u64* ent,
     if (n_start >= N1) return;
     u64 kcount = (N1 - n_start + cm - 1) / cm;
     if (kcount > p) kcount = p;
+
+    // Residue filters first: they need no Montgomery setup when gcd(cm, p-1) <= 2.
+    // T = t * b^-n_start must lie in <B>, B = b^cm.
+    u64 stride = 1, parity = 0;
+    const u64 g = gcd64(cm, p - 1UL);
+    const int jb = jacobi64(b_mod, p);
+    const int jt = jacobi64(t, p);
+    const int lT = jt * (((n_start & 1UL) != 0UL) ? jb : 1);   // Legendre(T)
+    if (g == 2UL) {
+        if (lT != 1) return;                 // B is a square, so T must be one
+    } else if (g < 2UL) {                    // cm odd: Legendre(B) = Legendre(b)
+        if (jb == 1) {
+            if (lT != 1) return;
+        } else {
+            stride = 2;
+            if (lT != 1) parity = 1;         // k odd
+        }
+    }
+
     u64 inv = p;
     for (int i = 0; i < 5; ++i) inv *= 2UL - p * inv;
     const u64 ninv = 0UL - inv;
@@ -219,58 +263,46 @@ KERNEL void prep(GLOBAL const u64* primes, GLOBAL uchar* flags, GLOBAL u64* ent,
     for (int i = 0; i < 64; ++i) { r2 = (r2 >= p - r2) ? r2 - (p - r2) : r2 + r2; }
     const u64 b_m = mmul(b_mod, r2, p, ninv);
     u64 B = mpow(b_m, cm, one, p, ninv);
-    u64 target = mmul(t, r2, p, ninv);
-    if (n_start != 0) {
-        u64 bs = mpow(b_m, n_start, one, p, ninv);
-        target = mmul(target, mpow(bs, p - 2UL, one, p, ninv), p, ninv);
+    const u64 tm = mmul(t, r2, p, ninv);
+    u64 G0 = mpow(b_m, n_start, one, p, ninv);
+    if (g > 2UL) {
+        // B is a g-th power residue, so T^((p-1)/g) == 1, i.e. t^e == (b^n_start)^e.
+        const u64 e = (p - 1UL) / g;
+        if (mpow(tm, e, one, p, ninv) != mpow(G0, e, one, p, ninv)) return;
     }
-    u64 stride = 1, parity = 0;
-    const u64 g = gcd64(cm, p - 1UL);
-    if (g >= 2UL) {
-        if (mpow(target, (p - 1UL) / g, one, p, ninv) != one) return;
-    } else {
-        const u64 e = (p - 1UL) >> 1;
-        const int lB = mpow(B, e, one, p, ninv) == one;
-        const int lt = mpow(target, e, one, p, ninv) == one;
-        if (lB) {
-            if (!lt) return;
-        } else {
-            stride = 2;
-            if (!lt) { parity = 1; target = mmul(target, mpow(B, p - 2UL, one, p, ninv), p, ninv); }
-            B = mmul(B, B, p, ninv);
-        }
+    if (stride == 2UL) {
+        if (parity) G0 = mmul(G0, B, p, ninv);
+        B = mmul(B, B, p, ninv);
     }
     if (kcount <= parity) return;
     const u64 jcount = (kcount - parity + stride - 1) / stride;
+    u64 m = (u64)sqrt((double)jcount);
+    while (m * m < jcount) ++m;
+    if (m == 0) m = 1;
+    const u64 Bm = mpow(B, m, one, p, ninv);
     const uint slot = ATOMIC_INC(ent_count);
-    GLOBAL u64* e7 = ent + (u64)slot * 7;
-    e7[0] = gid; e7[1] = p; e7[2] = ninv; e7[3] = one; e7[4] = B; e7[5] = target; e7[6] = jcount;
+    GLOBAL u64* e = ent + (u64)slot * ENT;
+    e[0] = gid; e[1] = p; e[2] = ninv; e[3] = one; e[4] = B; e[5] = tm; e[6] = G0; e[7] = jcount;
+    e[8] = Bm; e[9] = mpow(B, WG, one, p, ninv); e[10] = mpow(Bm, WG, one, p, ninv);
 }
 
-#define WG 64
 KERNEL void bsgs_wg(GLOBAL const u64* ent, GLOBAL uchar* flags, const u32 tbits
                       DYN_LOCAL_PARAM(tab)) {
     DYN_LOCAL_DECL(tab)
-    LOCAL u64 pw[WG];
-    LOCAL u64 st[2];
     LOCAL volatile int hit;
     const u32 lid = LOCAL_ID();
-    GLOBAL const u64* e7 = ent + (u64)GROUP_ID() * 7;
-    const u64 idx = e7[0], p = e7[1], ninv = e7[2], one = e7[3], B = e7[4], target = e7[5], jcount = e7[6];
+    GLOBAL const u64* e = ent + (u64)GROUP_ID() * ENT;
+    const u64 idx = e[0], p = e[1], ninv = e[2], one = e[3], B = e[4], tm = e[5], G0 = e[6], jcount = e[7];
+    const u64 Bm = e[8], BL = e[9], BmL = e[10];
     u64 m = (u64)sqrt((double)jcount);
     while (m * m < jcount) ++m;
     if (m == 0) m = 1;
     const u32 tsize = 1u << tbits, mask = tsize - 1u;
     for (u32 i = lid; i < tsize; i += WG) tab[i] = 0xFFFFFFFFu;
-    if (lid == 0) {
-        hit = 0;
-        u64 x = one;
-        for (int k = 0; k < WG; ++k) { pw[k] = x; x = mmul(x, B, p, ninv); }
-        st[0] = x;
-    }
+    if (lid == 0) hit = 0;
     BARRIER();
-    u64 v = pw[lid];
-    const u64 bstep = st[0];
+    // baby steps: t * B^i, i = lid, lid + WG, ...
+    u64 v = mmul(tm, mpow(B, lid, one, p, ninv), p, ninv);
     for (u64 i = lid; i < m; i += WG) {
         u32 f = fp32(v);
         u32 h = (u32)((v * 0x9E3779B97F4A7C15UL) >> (64 - tbits));
@@ -279,29 +311,18 @@ KERNEL void bsgs_wg(GLOBAL const u64* ent, GLOBAL uchar* flags, const u32 tbits
             if (prev == 0xFFFFFFFFu || prev == f) break;
             h = (h + 1u) & mask;
         }
-        v = mmul(v, bstep, p, ninv);
+        v = mmul(v, BL, p, ninv);
     }
     BARRIER();
-    if (lid == 0) {
-        const u64 Bm = mpow(B, m, one, p, ninv);
-        const u64 S = mpow(Bm, p - 2UL, one, p, ninv);
-        u64 x = target;
-        for (int k = 0; k < WG; ++k) { pw[k] = x; x = mmul(x, S, p, ninv); }
-        st[1] = x;  // target * S^64 ... we need S^64 as step
-        u64 s64 = S;
-        for (int k = 0; k < 6; ++k) s64 = mmul(s64, s64, p, ninv);
-        st[1] = s64;
-    }
-    BARRIER();
+    // giant steps: G0 * (B^m)^g, g = lid, lid + WG, ..., g <= G
     const u64 G = (jcount + m - 1) / m;
-    v = pw[lid];
-    const u64 gstep = st[1];
-    for (u64 gs = lid; gs < G; gs += WG) {
+    v = mmul(G0, mpow(Bm, lid, one, p, ninv), p, ninv);
+    for (u64 gs = lid; gs <= G; gs += WG) {
         if (hit) break;
         u32 f = fp32(v);
         u32 h = (u32)((v * 0x9E3779B97F4A7C15UL) >> (64 - tbits));
         while (tab[h] != 0xFFFFFFFFu) { if (tab[h] == f) { hit = 1; break; } h = (h + 1u) & mask; }
-        v = mmul(v, gstep, p, ninv);
+        v = mmul(v, BmL, p, ninv);
     }
     BARRIER();
     if (lid == 0 && hit) flags[idx] = 1;
@@ -387,7 +408,7 @@ public:
         const size_t batch = 262144;
         cl_int err = CL_SUCCESS;
         if (ent_cap_ < batch) {
-            d_ent_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, batch * 7 * sizeof(uint64_t), nullptr, &err);
+            d_ent_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, batch * 11 * sizeof(uint64_t), nullptr, &err);
             if (err != CL_SUCCESS) return fail("ent alloc");
             d_cnt_ = clCreateBuffer(ctx_, CL_MEM_READ_WRITE, sizeof(cl_uint), nullptr, &err);
             if (err != CL_SUCCESS) return fail("cnt alloc");
@@ -562,10 +583,12 @@ public:
     }
     bool ok() const { return use_cuda_ ? cuda_.ok() : opencl_.ok(); }
     bool filter(const std::vector<uint64_t>& primes, const WorkItem& item, std::vector<std::size_t>& todo) {
+        std::lock_guard<std::mutex> lock(mutex_);  // 12.1: several feeder threads share one GPU
         return use_cuda_ ? cuda_.filter(primes, item, todo) : opencl_.filter(primes, item, todo);
     }
 
 private:
+    std::mutex mutex_;
     CudaSiever cuda_;
     OpenClSiever opencl_;
     bool use_cuda_ = false;

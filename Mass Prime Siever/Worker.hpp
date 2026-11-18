@@ -256,7 +256,8 @@ inline std::size_t process_chunk(const PrimeChunk& chunk, int thread_id, const W
 }
 
 inline void run_worker_pool(const WorkItem& item, int cpu_count, int memory_allowed_mb,
-                            const std::vector<uint32_t>& small_primes, GpuSiever* gpu = nullptr) {
+                            const std::vector<uint32_t>& small_primes, GpuSiever* gpu = nullptr,
+                            int gpu_threads = 1) {
     ChunkQueue queue;
     const std::size_t chunk_size = worker_chunk_size_bytes(memory_allowed_mb, cpu_count);
     const std::size_t total_chunks = count_prime_chunks(item, chunk_size);
@@ -287,8 +288,10 @@ inline void run_worker_pool(const WorkItem& item, int cpu_count, int memory_allo
         });
     }
 
-    if (gpu != nullptr && gpu->ok()) {
-        const int gpu_id = cpu_count;  // core_<cpu_count>.p
+    // 12.1: several feeder threads share the GPU (GpuSiever::filter serializes them), so one thread
+    // sieves its next chunk on the CPU while another one's chunk is on the GPU.
+    for (int g = 0; gpu != nullptr && gpu->ok() && g < gpu_threads; ++g) {
+        const int gpu_id = cpu_count + g;  // core_<cpu_count + g>.p
         workers.emplace_back([&, gpu_id]() {
             while (!failed.load() && !shutdown_requested.load()) {
                 const auto chunk = queue.pop();

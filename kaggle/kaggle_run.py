@@ -118,6 +118,8 @@ def main():
     ap.add_argument("--gpus", type=int, default=None, help="number of GPU workers (default: all)")
     ap.add_argument("--cpu-threads", type=int, default=None,
                     help="CPU threads per worker (default: spread the free cores over the workers)")
+    ap.add_argument("--gpu-threads", type=int, default=2,
+                    help="feeder threads per GPU worker; one sieves on the CPU while another's chunk is on the GPU")
     ap.add_argument("--backend", default="auto", choices=["auto", "cuda", "opencl"])
     ap.add_argument("--skip-self-test", action="store_true")
     ap.add_argument("--report-minutes", type=float, default=30,
@@ -140,7 +142,7 @@ def main():
         step = (args.p1 - args.p0) // n
         cpu = args.cpu_threads
         if cpu is None:
-            cpu = max(0, (os.cpu_count() or 2) - n) // n  # leave one core per GPU feeder thread
+            cpu = max(0, (os.cpu_count() or 2) - n * args.gpu_threads) // n  # a core per feeder thread
         for i in range(n):
             lo = args.p0 + i * step
             hi = args.p1 if i == n - 1 else lo + step
@@ -152,7 +154,8 @@ def main():
             with open(os.path.join(d, "worktodo.txt"), "w") as f:
                 f.write(line + "\n")
             with open(os.path.join(d, "prime.ini"), "w") as f:
-                f.write(f"CPU_count={cpu}\nMemoryAllowed=64\nUseGPU=1\nGPU_device={i}\nGPU_backend={args.backend}\n")
+                f.write(f"CPU_count={cpu}\nMemoryAllowed=64\nUseGPU=1\nGPU_device={i}\nGPU_backend={args.backend}\n"
+                        f"GPU_threads={args.gpu_threads}\n")
             print(f"gpu{i}: {line}  (CPU_count={cpu})")
         slots = sorted(d for d in os.listdir(args.state) if d.startswith("gpu"))
     elif not restored:
